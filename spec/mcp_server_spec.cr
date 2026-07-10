@@ -359,14 +359,42 @@ describe Engram::McpServer do
         result = responses[0]["result"]
         result["content"][0]["text"].as_s.should contain("commit")
         file_path = result["structuredContent"]["file_path"].as_s
-        File.exists?(file_path).should be_true
+        file_path.should start_with(".agents/memories/")
+        file_path.should_not start_with("/")
 
-        written = File.read(file_path)
+        absolute_path = File.join(dir, file_path)
+        File.exists?(absolute_path).should be_true
+
+        written = File.read(absolute_path)
         written.should contain("title: A new decision")
         written.should contain("**Decision:** do the thing.")
 
         id = result["structuredContent"]["id"].as_i64
         File.basename(file_path).should eq("#{id}_a-new-decision.md")
+      end
+    end
+
+    it "mints distinct ids for repeated remember calls in the same MCP session, even within the same second" do
+      SpecHelper.with_tempdir do |dir|
+        store = Engram::Store.new(db_path(dir))
+        requests = (1..6).map do |n|
+          request_json(n, "tools/call", {
+            "name"      => "remember",
+            "arguments" => {"title" => "Decision number #{n}", "body" => "body #{n}"},
+          })
+        end
+
+        responses = run_requests(store, dir, requests)
+        store.close
+
+        ids = responses.map { |r| r["result"]["structuredContent"]["id"].as_i64 }
+        ids.uniq.size.should eq(6)
+
+        ids.each do |memory_id|
+          file_path = responses.find { |r| r["result"]["structuredContent"]["id"].as_i64 == memory_id }
+            .not_nil!["result"]["structuredContent"]["file_path"].as_s
+          File.exists?(File.join(dir, file_path)).should be_true
+        end
       end
     end
   end

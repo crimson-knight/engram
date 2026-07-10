@@ -1,4 +1,5 @@
 require "digest/sha256"
+require "time"
 
 module Engram
   # Raised when a memory migration file cannot be parsed: bad frontmatter,
@@ -239,6 +240,30 @@ module Engram
         end
         seen[file.id] = file.file_path
       end
+    end
+
+    # The next unused 14-digit migration id for *memories_dir*: the current UTC
+    # time, bumped a second at a time until no existing `<id>_*.md` file already
+    # claims it. Shared by `engram new` (`Cli.next_migration_id`) and the MCP
+    # `remember` tool so that firing several `remember` calls within the same
+    # wall-clock second can never mint the same id twice.
+    def self.next_id(memories_dir : String) : Int64
+      existing = Dir.exists?(memories_dir) ? Dir.glob(File.join(memories_dir, "*.md")).map { |p| File.basename(p) } : [] of String
+      time = Time.utc
+      loop do
+        id = time.to_s("%Y%m%d%H%M%S")
+        return id.to_i64 unless existing.any?(&.starts_with?("#{id}_"))
+        time = time + 1.second
+      end
+    end
+
+    # The repo-relative form of *path* (a file living under *memories_dir*):
+    # the last two path segments of *memories_dir* (conventionally
+    # ".agents/memories") joined with the file's basename. Keeps the `file_path`
+    # schema column (docs/SPEC.md: "repo-relative source path") stable no
+    # matter how absolute *memories_dir* and *path* happen to be for the caller.
+    def self.repo_relative_path(memories_dir : String, path : String) : String
+      File.join(File.basename(File.dirname(memories_dir)), File.basename(memories_dir), File.basename(path))
     end
   end
 end

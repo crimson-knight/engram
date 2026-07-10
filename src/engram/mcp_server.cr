@@ -289,23 +289,24 @@ module Engram
       topics = string_array(args["topics"]?, "topics")
       supersedes = int64_array(args["supersedes"]?, "supersedes")
 
-      memory_id = Time.utc.to_s("%Y%m%d%H%M%S").to_i64
+      Dir.mkdir_p(@memories_dir) unless Dir.exists?(@memories_dir)
+      memory_id = MemoryFile.next_id(@memories_dir)
       memory = MemoryFile.new(
         id: memory_id, slug: MemoryFile.slugify(title), title: title, topics: topics,
         supersedes: supersedes, author: nil, body: body, file_path: ""
       )
-      Dir.mkdir_p(@memories_dir) unless Dir.exists?(@memories_dir)
       path = File.join(@memories_dir, memory.filename)
       File.write(path, memory.serialize)
       @run_sync.call
 
+      relative_path = MemoryFile.repo_relative_path(@memories_dir, path)
       text = <<-TEXT
-        Remembered as ##{memory_id} (#{path}).
+        Remembered as ##{memory_id} (#{relative_path}).
         IMPORTANT: this migration file is on disk but not yet committed. Run
         `git add #{path}` and commit it now, or this memory disappears the
         next time the working tree is reset and never reaches any other clone.
         TEXT
-      write_tool_result(id, text, {"id" => memory_id, "file_path" => path})
+      write_tool_result(id, text, {"id" => memory_id, "file_path" => relative_path})
     end
 
     # `memory_status`: counts plus embedder/last-sync state read from `engram_meta`.

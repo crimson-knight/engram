@@ -48,7 +48,7 @@ module Engram
       file_ids = files_by_id.keys.to_set
 
       rolled_back = rollback_missing(store, stored_ids, file_ids)
-      applied, updated = apply_and_update(store, files_by_id, stored_ids, embedder)
+      applied, updated = apply_and_update(memories_dir, store, files_by_id, stored_ids, embedder)
 
       recompute_superseded_by(store, files_by_id)
       reembed_on_dimension_change(store, embedder, files_by_id, applied, updated) if embedder
@@ -74,24 +74,28 @@ module Engram
       ids
     end
 
-    # Inserts memories that are new to the store and re-applies ones whose content changed; returns (applied, updated) ids.
-    private def self.apply_and_update(store : Store, files_by_id : Hash(Int64, MemoryFile), stored_ids : Set(Int64),
-                                      embedder : Embedder?) : {Array(Int64), Array(Int64)}
+    # Inserts memories that are new to the store and re-applies ones whose content, slug, or
+    # path changed; returns (applied, updated) ids. `file_path` is always stored repo-relative
+    # (docs/SPEC.md's schema contract), derived from *memories_dir* rather than the tree-walk's
+    # absolute path.
+    private def self.apply_and_update(memories_dir : String, store : Store, files_by_id : Hash(Int64, MemoryFile),
+                                      stored_ids : Set(Int64), embedder : Embedder?) : {Array(Int64), Array(Int64)}
       applied = [] of Int64
       updated = [] of Int64
 
       files_by_id.keys.sort.each do |id|
         memory = files_by_id[id]
+        relative_path = MemoryFile.repo_relative_path(memories_dir, memory.file_path)
 
         if stored_ids.includes?(id)
           existing = store.get(id).not_nil!
-          next unless content_changed?(memory, existing)
+          next unless content_changed?(memory, existing, relative_path)
 
           embedding = embedder.try(&.embed(embed_text(memory))) || existing.embedding
           store.update_memory(
             id: memory.id, slug: memory.slug, title: memory.title, topics: memory.topics,
             author: memory.author, body: memory.body, supersedes: memory.supersedes,
-            file_path: memory.file_path, embedding: embedding,
+            file_path: relative_path, embedding: embedding,
           )
           updated << id
         else
@@ -99,7 +103,7 @@ module Engram
           store.insert_memory(
             id: memory.id, slug: memory.slug, title: memory.title, topics: memory.topics,
             author: memory.author, body: memory.body, supersedes: memory.supersedes,
-            file_path: memory.file_path, embedding: embedding,
+            file_path: relative_path, embedding: embedding,
           )
           applied << id
         end
@@ -108,8 +112,14 @@ module Engram
       {applied, updated}
     end
 
-    # True when *memory*'s content differs from the *existing* stored record (id/slug/path don't count).
-    private def self.content_changed?(memory : MemoryFile, existing : MemoryRecord) : Bool
+    # True when *memory*'s content differs from the *existing* stored record, OR when the file
+    # was renamed/moved on disk (same id, same content_hash, but a different slug or
+    # *relative_path*) — a rename alone must still trigger an in-place update, or the stored
+    # slug/file_path go stale until the body next changes.
+    private def self.content_changed?(memory : MemoryFile, existing : MemoryRecord, relative_path : String) : Bool
+      return true if memory.slug != existing.slug
+      return true if relative_path != existing.file_path
+
       existing_as_file = MemoryFile.new(
         id: existing.id, slug: existing.slug, title: existing.title, topics: existing.topics,
         supersedes: existing.supersedes, author: existing.author, body: existing.body,

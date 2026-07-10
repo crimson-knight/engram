@@ -227,6 +227,10 @@ module Engram
             score = bm25(memories_fts) - 1.0 * (id - oldest) / (newest - oldest)
           When an embedder is configured, cosine similarity over stored
           embeddings is blended in via Reciprocal Rank Fusion (k=60).
+
+          A query word that begins with '-' is still read as query text, not
+          an unknown option. Use `--` to mark, explicitly, where options end
+          and the (rest of the) query begins.
           BANNER
         p.on("--topic TOPIC", "Restrict to this topic") { |t| topic = t }
         p.on("--limit N", "Max results (default 10)") { |n| limit = n.to_i }
@@ -234,10 +238,11 @@ module Engram
         p.on("--json", "Machine-readable JSON output") { json = true }
         p.on("-h", "--help", "Show this help") { @stdout.puts p; help_requested = true }
       end
-      parser.parse(args)
+      option_args, positional_args = self.class.split_positional_args(args, ["--topic", "--limit"], ["--all", "--json", "-h", "--help"])
+      parser.parse(option_args)
       return 0 if help_requested
 
-      query = args.join(" ")
+      query = positional_args.join(" ")
       if query.empty?
         @stderr.puts "engram: search requires a query"
         return 1
@@ -295,10 +300,11 @@ module Engram
         p.on("--json", "Machine-readable JSON output") { json = true }
         p.on("-h", "--help", "Show this help") { @stdout.puts p; help_requested = true }
       end
-      parser.parse(args)
+      option_args, positional_args = self.class.split_positional_args(args, [] of String, ["--json", "-h", "--help"])
+      parser.parse(option_args)
       return 0 if help_requested
 
-      id_arg = args.first?
+      id_arg = positional_args.first?
       unless id_arg
         @stderr.puts "engram: show requires a memory id"
         return 1
@@ -572,14 +578,41 @@ module Engram
     end
 
     # The next unused 14-digit migration id, bumping by a second on collision (vanishingly rare).
+    # Delegates to `MemoryFile.next_id`, the same collision-avoiding logic the MCP `remember`
+    # tool uses, so `engram new` and `remember` can never mint the same id twice.
     def self.next_migration_id(memories_dir : String) : Int64
-      existing = Dir.exists?(memories_dir) ? Dir.glob(File.join(memories_dir, "*.md")).map { |p| File.basename(p) } : [] of String
-      time = Time.utc
-      loop do
-        id = time.to_s("%Y%m%d%H%M%S")
-        return id.to_i64 unless existing.any?(&.starts_with?("#{id}_"))
-        time = time + 1.second
+      MemoryFile.next_id(memories_dir)
+    end
+
+    # Splits *args* into (option tokens, positional tokens) for commands whose positional text
+    # (a search query, a show id) must be taken literally even when it begins with '-' — a bare
+    # OptionParser would otherwise reject it as an unknown flag. *valued_flags* consume the
+    # following token as their value; *boolean_flags* stand alone; anything else is positional,
+    # including tokens that merely look like flags. A literal `--` ends flag scanning early:
+    # every token after it is positional even if it exactly matches a flag name.
+    def self.split_positional_args(args : Array(String), valued_flags : Array(String), boolean_flags : Array(String)) : {Array(String), Array(String)}
+      options = [] of String
+      positional = [] of String
+      literal = false
+      index = 0
+      while index < args.size
+        arg = args[index]
+        if literal
+          positional << arg
+        elsif arg == "--"
+          literal = true
+        elsif valued_flags.includes?(arg)
+          options << arg
+          index += 1
+          options << args[index] if index < args.size
+        elsif boolean_flags.includes?(arg)
+          options << arg
+        else
+          positional << arg
+        end
+        index += 1
       end
+      {options, positional}
     end
 
     # Writes a fully-commented-out `.agents/engram.yml` stub if the file doesn't already exist; returns whether it was written.

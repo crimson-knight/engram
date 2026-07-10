@@ -230,6 +230,39 @@ describe Engram::Sync do
       end
     end
 
+    it "stores a repo-relative file_path, not the tree-walk's absolute path" do
+      with_temp_repo do |dir|
+        write_memory(dir, ID_A, "Some decision")
+        store = Engram::Store.new(db_path(dir))
+        Engram::Sync.run(memories_dir(dir), store)
+        record = store.get(ID_A).not_nil!
+        store.close
+
+        record.file_path.should eq(".agents/memories/#{ID_A}_some-decision.md")
+        record.file_path.should_not start_with("/")
+      end
+    end
+
+    it "re-applies (refreshing slug and file_path) when a memory file is renamed with unchanged content" do
+      with_temp_repo do |dir|
+        old_path = write_memory(dir, ID_A, "Original Title")
+        store = Engram::Store.new(db_path(dir))
+        Engram::Sync.run(memories_dir(dir), store)
+
+        new_path = File.join(memories_dir(dir), "#{ID_A}_renamed-title.md")
+        File.rename(old_path, new_path)
+
+        result = Engram::Sync.run(memories_dir(dir), store)
+        record = store.get(ID_A).not_nil!
+        store.close
+
+        result.updated.should eq([ID_A])
+        result.applied.should eq([] of Int64)
+        record.slug.should eq("renamed-title")
+        record.file_path.should eq(".agents/memories/#{ID_A}_renamed-title.md")
+      end
+    end
+
     it "picks the newest (highest id) superseder when two memories both claim to supersede the same id" do
       with_temp_repo do |dir|
         write_memory(dir, ID_A, "Old decision")

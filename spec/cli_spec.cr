@@ -181,6 +181,35 @@ describe "engram CLI" do
     end
   end
 
+  it "treats a hyphen-leading query or id as literal text, not an unknown option" do
+    ensure_binary_built
+
+    SpecHelper.with_tempdir do |dir|
+      init_git_repo(dir)
+      run_engram(dir, ["init"])
+
+      stdout_text, err, code = run_engram(dir, ["search", "-foo"])
+      code.should eq(0)
+      err.should eq("")
+      stdout_text.should contain("No memories found")
+
+      stdout_text, err, code = run_engram(dir, ["search", "---"])
+      code.should eq(0)
+      err.should eq("")
+
+      # An explicit `--` still marks the end of options for a query that
+      # would otherwise collide with a real flag name.
+      stdout_text, err, code = run_engram(dir, ["search", "--", "--json"])
+      code.should eq(0)
+      err.should eq("")
+      stdout_text.should contain("No memories found")
+
+      stdout_text, err, code = run_engram(dir, ["show", "-abc"])
+      code.should eq(1)
+      err.should contain("'-abc' is not a valid memory id")
+    end
+  end
+
   it "exits 1 with a clear message when `show` is given an unknown id" do
     ensure_binary_built
 
