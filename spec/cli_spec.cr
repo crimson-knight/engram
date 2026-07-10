@@ -156,6 +156,121 @@ describe "engram CLI" do
     end
   end
 
+  it "installs hooks into the shared common dir from a linked worktree, not its private gitdir" do
+    ensure_binary_built
+
+    SpecHelper.with_tempdir do |dir|
+      main_dir = File.join(dir, "main")
+      Dir.mkdir_p(main_dir)
+      init_git_repo(main_dir)
+      run_engram(main_dir, ["init"])
+      Process.run("git", ["add", "-A"], chdir: main_dir)
+      Process.run("git", ["commit", "-q", "-m", "init"], chdir: main_dir)
+
+      worktree_dir = File.join(dir, "wt")
+      wt_status = Process.run("git", ["worktree", "add", "-q", "-b", "wt-branch", worktree_dir], chdir: main_dir)
+      wt_status.success?.should be_true
+
+      # Installing from *inside* the linked worktree must land the hook in the
+      # main repo's shared `.git/hooks` — never the worktree's own private
+      # `.git/worktrees/<name>/hooks`, which git never consults when deciding
+      # whether to run a hook (so a hook installed there is permanently inert).
+      stdout_text, err, code = run_engram(worktree_dir, ["hook", "install"])
+      code.should eq(0)
+      err.should eq("")
+
+      shared_hook = File.join(main_dir, ".git", "hooks", "post-checkout")
+      private_hook = File.join(main_dir, ".git", "worktrees", "wt-branch", "hooks", "post-checkout")
+
+      File.exists?(shared_hook).should be_true
+      File.read(shared_hook).should contain("# >>> engram >>>")
+      (File.info(shared_hook).permissions.value & 0o111).should_not eq(0)
+      File.exists?(private_hook).should be_false
+
+      # `doctor`, also run from inside the worktree, must resolve the same
+      # shared path and see the hook as installed.
+      stdout_text, err, code = run_engram(worktree_dir, ["doctor"])
+      code.should eq(0)
+      stdout_text.should contain("git hooks installed")
+    end
+  end
+
+  it "installs hooks into a configured core.hooksPath directory instead of .git/hooks" do
+    ensure_binary_built
+
+    SpecHelper.with_tempdir do |dir|
+      init_git_repo(dir)
+      run_engram(dir, ["init"])
+
+      custom_hooks_dir = File.join(dir, "custom-hooks")
+      Dir.mkdir_p(custom_hooks_dir)
+      Process.run("git", ["config", "core.hooksPath", custom_hooks_dir], chdir: dir)
+
+      stdout_text, err, code = run_engram(dir, ["hook", "install"])
+      code.should eq(0)
+      err.should eq("")
+
+      configured_hook = File.join(custom_hooks_dir, "post-checkout")
+      default_hook = File.join(dir, ".git", "hooks", "post-checkout")
+
+      File.exists?(configured_hook).should be_true
+      File.read(configured_hook).should contain("# >>> engram >>>")
+      (File.info(configured_hook).permissions.value & 0o111).should_not eq(0)
+      File.exists?(default_hook).should be_false
+
+      stdout_text, err, code = run_engram(dir, ["doctor"])
+      code.should eq(0)
+      stdout_text.should contain("git hooks installed")
+    end
+  end
+
+  it "makes a pre-existing, non-executable hook file executable when appending the engram block" do
+    ensure_binary_built
+
+    SpecHelper.with_tempdir do |dir|
+      init_git_repo(dir)
+      run_engram(dir, ["init"])
+
+      hooks_dir = File.join(dir, ".git", "hooks")
+      Dir.mkdir_p(hooks_dir)
+      hook_path = File.join(hooks_dir, "post-checkout")
+      File.write(hook_path, "#!/bin/sh\necho 'a pre-existing user hook line'\n")
+      File.chmod(hook_path, 0o644)
+      (File.info(hook_path).permissions.value & 0o111).should eq(0)
+
+      stdout_text, err, code = run_engram(dir, ["hook", "install"])
+      code.should eq(0)
+
+      content = File.read(hook_path)
+      content.should contain("echo 'a pre-existing user hook line'")
+      content.should contain("# >>> engram >>>")
+      (File.info(hook_path).permissions.value & 0o111).should_not eq(0)
+    end
+  end
+
+  it "doctor does not count a marker-carrying hook as installed unless it's also executable" do
+    ensure_binary_built
+
+    SpecHelper.with_tempdir do |dir|
+      init_git_repo(dir)
+      run_engram(dir, ["init"])
+
+      hooks_dir = File.join(dir, ".git", "hooks")
+      Dir.mkdir_p(hooks_dir)
+      marker_body = "#!/bin/sh\n\n# >>> engram >>>\nengram sync --quiet\n# <<< engram <<<\n"
+      ["post-checkout", "post-merge", "post-rewrite"].each do |name|
+        path = File.join(hooks_dir, name)
+        File.write(path, marker_body)
+        File.chmod(path, 0o644) # marker present, but deliberately non-executable
+      end
+
+      stdout_text, err, code = run_engram(dir, ["doctor"])
+      code.should eq(0)
+      stdout_text.should_not contain("git hooks installed (")
+      stdout_text.should contain("git hooks not installed")
+    end
+  end
+
   it "exits 1 with a clear message on a duplicate memory id" do
     ensure_binary_built
 

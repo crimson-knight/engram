@@ -1,4 +1,5 @@
 require "option_parser"
+require "process"
 require "socket"
 require "uri"
 require "json"
@@ -159,11 +160,14 @@ module Engram
       memories_dir = self.class.memories_dir_for(repo_root)
       Dir.mkdir_p(memories_dir) unless Dir.exists?(memories_dir)
 
-      id = self.class.next_migration_id(memories_dir)
       slug = MemoryFile.slugify(title)
-      content = MemoryFile.scaffold(id, title, topics, supersedes, ENV["USER"]?)
-      path = File.join(memories_dir, "#{id}_#{slug}.md")
-      File.write(path, content)
+      # Claim the id and publish the file in one atomic step (see
+      # `MemoryFile.claim_and_write`): two `engram new`/`remember` calls racing
+      # in the same wall-clock second get distinct ids instead of silently
+      # truncating each other's file.
+      _, path = MemoryFile.claim_and_write(memories_dir, slug) do |candidate_id|
+        MemoryFile.scaffold(candidate_id, title, topics, supersedes, ENV["USER"]?)
+      end
       @stdout.puts path
 
       if STDIN.tty? && STDOUT.tty? && (editor = ENV["EDITOR"]?)
@@ -405,17 +409,17 @@ module Engram
       end
 
       repo_root = self.class.find_repo_root(Dir.current)
-      git_dir = self.class.git_dir_for(repo_root)
+      hooks_dir = self.class.hooks_dir_for(repo_root)
 
       if sub == "install"
-        installed = Hooks.install(git_dir)
+        installed = Hooks.install(hooks_dir)
         if installed.empty?
           @stdout.puts "engram: hooks already installed"
         else
           @stdout.puts "engram: installed hooks: #{installed.join(", ")}"
         end
       else
-        removed = Hooks.uninstall(git_dir)
+        removed = Hooks.uninstall(hooks_dir)
         if removed.empty?
           @stdout.puts "engram: no engram hooks were installed"
         else
@@ -436,7 +440,6 @@ module Engram
       return 0 if help_requested
 
       repo_root = self.class.find_repo_root(Dir.current)
-      git_dir = self.class.git_dir_for(repo_root)
       db_path = self.class.db_path_for(repo_root)
       memories_dir = self.class.memories_dir_for(repo_root)
 
@@ -457,13 +460,24 @@ module Engram
         @stdout.puts "[warn] #{memories_dir} does not exist yet (run `engram init`)"
       end
 
-      hooks_installed = self.class.hooks_installed(git_dir)
-      if hooks_installed.size == Hooks::HOOK_NAMES.size
-        @stdout.puts "[ok] git hooks installed (#{hooks_installed.join(", ")})"
-      elsif hooks_installed.empty?
-        @stdout.puts "[warn] git hooks not installed (run `engram hook install`)"
-      else
-        @stdout.puts "[warn] git hooks partially installed (#{hooks_installed.join(", ")}; run `engram hook install`)"
+      hooks_dir = begin
+        self.class.hooks_dir_for(repo_root)
+      rescue ex : EnvironmentError
+        @stdout.puts "[fail] #{ex.message}"
+        ok = false
+        environment_problem = true
+        nil
+      end
+
+      if hooks_dir
+        hooks_installed = self.class.hooks_installed(hooks_dir)
+        if hooks_installed.size == Hooks::HOOK_NAMES.size
+          @stdout.puts "[ok] git hooks installed (#{hooks_installed.join(", ")})"
+        elsif hooks_installed.empty?
+          @stdout.puts "[warn] git hooks not installed (run `engram hook install`)"
+        else
+          @stdout.puts "[warn] git hooks partially installed (#{hooks_installed.join(", ")}; run `engram hook install`)"
+        end
       end
 
       config_path = File.join(repo_root, CONFIG_FILE)
@@ -541,6 +555,10 @@ module Engram
 
     # The real git directory for *repo_root*'s `.git` entry: itself if a
     # directory, or the target of a worktree/submodule `gitdir:` pointer file.
+    # In a linked worktree this is the *private* per-worktree gitdir (e.g.
+    # `.git/worktrees/<name>`) — exactly right for `db_path_for`'s per-clone
+    # cache, which is deliberately worktree-private, but wrong for anything
+    # that needs git's actual hooks directory. Use `hooks_dir_for` for that.
     def self.git_dir_for(repo_root : String) : String
       entry = File.join(repo_root, ".git")
       return entry if Dir.exists?(entry)
@@ -555,6 +573,25 @@ module Engram
     # The per-clone SQLite cache path: `<git dir>/engram.db`.
     def self.db_path_for(repo_root : String) : String
       File.join(git_dir_for(repo_root), "engram.db")
+    end
+
+    # Resolves *repo_root*'s effective hooks directory the same way git itself
+    # resolves it when deciding whether to run a hook: by shelling out to
+    # `git rev-parse --path-format=absolute --git-path hooks`. This — not
+    # `git_dir_for` plus a manually-joined "hooks" — honors `core.hooksPath`
+    # (which can point anywhere, under any name) and, in a linked worktree,
+    # resolves to the *shared* common-dir hooks rather than the worktree's own
+    # private gitdir. A hook installed anywhere else is silently never run by
+    # git, so every path that installs or checks hooks must go through this.
+    def self.hooks_dir_for(repo_root : String) : String
+      stdout = IO::Memory.new
+      stderr = IO::Memory.new
+      status = Process.run("git", ["-C", repo_root, "rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+        output: stdout, error: stderr)
+      unless status.success?
+        raise EnvironmentError.new("could not resolve git's hooks directory: #{stderr.to_s.strip}")
+      end
+      stdout.to_s.strip
     end
 
     # Guarantees the sqlite schema exists at *db_path* before a read-only command (`search`,
@@ -590,13 +627,6 @@ module Engram
     # Splits a `--topics a,b` / `--supersedes 1,2` style comma list into trimmed, non-empty parts.
     def self.split_csv(value : String) : Array(String)
       value.split(',').map(&.strip).reject(&.empty?)
-    end
-
-    # The next unused 14-digit migration id, bumping by a second on collision (vanishingly rare).
-    # Delegates to `MemoryFile.next_id`, the same collision-avoiding logic the MCP `remember`
-    # tool uses, so `engram new` and `remember` can never mint the same id twice.
-    def self.next_migration_id(memories_dir : String) : Int64
-      MemoryFile.next_id(memories_dir)
     end
 
     # Splits *args* into (option tokens, positional tokens) for commands whose positional text
@@ -680,12 +710,21 @@ module Engram
       db.try(&.close)
     end
 
-    # Which of the three managed hooks currently carry the engram marker under *git_dir*/hooks.
-    def self.hooks_installed(git_dir : String) : Array(String)
+    # Which of the three managed hooks currently exist, are executable, and carry the
+    # engram marker under the effective *hooks_dir* (from `hooks_dir_for` — never a
+    # manually-joined `<git_dir>/hooks`). All three must hold: git silently skips a
+    # non-executable hook, so a marker-only match would have `doctor` call a dead
+    # hook file "installed" when it will never actually run.
+    def self.hooks_installed(hooks_dir : String) : Array(String)
       Hooks::HOOK_NAMES.select do |name|
-        path = File.join(git_dir, "hooks", name)
-        File.exists?(path) && File.read(path).includes?(Hooks::MARKER_START)
+        path = File.join(hooks_dir, name)
+        File.exists?(path) && executable?(path) && File.read(path).includes?(Hooks::MARKER_START)
       end
+    end
+
+    # True if *path* has any executable bit set (owner, group, or other).
+    def self.executable?(path : String) : Bool
+      (File.info(path).permissions.value & 0o111) != 0
     end
 
     # Best-effort TCP reachability check for *config*'s endpoint host:port (no request body sent).
@@ -704,7 +743,7 @@ module Engram
     # `PRAGMA integrity_check` against *db_path*; true (nothing to check yet) if the file doesn't exist.
     def self.db_integrity_ok?(db_path : String) : Bool
       return true unless File.exists?(db_path)
-      db = DB.open("sqlite3://#{db_path}")
+      db = DB.open(Store.connection_uri(db_path))
       db.scalar("PRAGMA integrity_check").to_s == "ok"
     rescue
       false

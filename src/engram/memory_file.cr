@@ -109,8 +109,19 @@ module Engram
       supersedes = fields.has_key?("supersedes") ? parse_array(fields["supersedes"], path, 1).map(&.to_i64) : [] of Int64
       author = fields.has_key?("author") ? unquote(fields["author"]) : nil
 
-      body_lines = lines[(closing_line + 1)..]
-      body = body_lines.join('\n').strip
+      # Recover the body as a byte-exact substring of the original *content*
+      # (not a re-joined line array) so nothing about it is normalized away.
+      # The only thing we strip is the format's two structural bytes: the
+      # single mandatory blank line between the closing fence and the body
+      # (`serialize`/`scaffold` always emit "---\n\n"), and the single
+      # terminal newline `serialize` always appends. Anything else --
+      # leading indentation on the first body line, extra blank lines,
+      # trailing blank lines -- is meaningful content and round-trips as-is.
+      header = lines[0..closing_line].join('\n')
+      raw_body = content[(header.size + 1)..]? || ""
+      raw_body = raw_body[1..] if raw_body.starts_with?('\n')
+      raw_body = raw_body[0...-1] if raw_body.ends_with?('\n')
+      body = raw_body
 
       new(
         id: frontmatter_id,
@@ -130,7 +141,7 @@ module Engram
       return trimmed if trimmed.empty?
 
       if trimmed.starts_with?('[')
-        close_index = trimmed.index(']')
+        close_index = find_array_close_bracket(trimmed)
         raise ParseError.new(path, line, "array value #{trimmed.inspect} is missing a closing ']'") unless close_index
         remainder = trimmed[(close_index + 1)..].strip
         unless remainder.empty? || remainder.starts_with?('#')
@@ -140,8 +151,7 @@ module Engram
       end
 
       if trimmed.starts_with?('"') || trimmed.starts_with?('\'')
-        quote = trimmed[0]
-        close_index = trimmed.index(quote, 1)
+        close_index = find_matching_quote(trimmed, 0)
         raise ParseError.new(path, line, "quoted value #{trimmed.inspect} is missing its closing quote") unless close_index
         remainder = trimmed[(close_index + 1)..].strip
         unless remainder.empty? || remainder.starts_with?('#')
@@ -154,12 +164,72 @@ module Engram
       hash_index ? trimmed[0...hash_index].rstrip : trimmed
     end
 
-    # Removes a matching pair of surrounding quotes from a scalar value, if present.
+    # Finds the index of the closing quote matching the opening `"`/`'` at
+    # *value*[*start_index*], honoring `\`-escaped quote characters inside it
+    # (so a quoted scalar like `"He said \"go\""` isn't cut short at the
+    # first embedded quote). Returns nil if the quote is never closed.
+    private def self.find_matching_quote(value : String, start_index : Int32) : Int32?
+      quote = value[start_index]
+      index = start_index + 1
+      while index < value.size
+        char = value[index]
+        if char == '\\' && index + 1 < value.size
+          index += 2
+        elsif char == quote
+          return index
+        else
+          index += 1
+        end
+      end
+      nil
+    end
+
+    # Finds the index of the `]` closing the array value starting at
+    # *value*[0] == '[', skipping over any quoted item's contents (which may
+    # itself contain `,` or `]`) so `["a, b]", c]` isn't cut short.
+    private def self.find_array_close_bracket(value : String) : Int32?
+      index = 1
+      while index < value.size
+        char = value[index]
+        if char == '"' || char == '\''
+          closing = find_matching_quote(value, index)
+          return nil unless closing
+          index = closing + 1
+        elsif char == ']'
+          return index
+        else
+          index += 1
+        end
+      end
+      nil
+    end
+
+    # Removes a matching pair of surrounding quotes from a scalar value, if
+    # present, and undoes the `\\`/`\"` escaping `MemoryFile#serialize` uses
+    # for values that needed quoting in the first place.
     private def self.unquote(value : String) : String
       if value.size >= 2 && (value[0] == '"' || value[0] == '\'') && value[-1] == value[0]
-        value[1..-2]
+        unescape_scalar(value[1..-2])
       else
         value
+      end
+    end
+
+    # Reverses `escape_scalar`: a `\` followed by any character collapses to
+    # that character literally (so `\\` -> `\` and `\"` -> `"`).
+    private def self.unescape_scalar(value : String) : String
+      String.build do |str|
+        index = 0
+        while index < value.size
+          char = value[index]
+          if char == '\\' && index + 1 < value.size
+            str << value[index + 1]
+            index += 2
+          else
+            str << char
+            index += 1
+          end
+        end
       end
     end
 
@@ -168,7 +238,31 @@ module Engram
       raise ParseError.new(path, line, "expected array value like [a, b], got #{value.inspect}") unless value.starts_with?('[') && value.ends_with?(']')
       inner = value[1..-2].strip
       return [] of String if inner.empty?
-      inner.split(',').map { |item| unquote(item.strip) }
+      split_array_items(inner).map { |item| unquote(item.strip) }
+    end
+
+    # Splits the interior of an array value on top-level commas, treating a
+    # quoted item's contents as opaque so `["a, b", c]` yields two items
+    # (`a, b` and `c`), not three.
+    private def self.split_array_items(inner : String) : Array(String)
+      items = [] of String
+      start = 0
+      index = 0
+      while index < inner.size
+        char = inner[index]
+        if char == '"' || char == '\''
+          closing = find_matching_quote(inner, index)
+          index = closing ? closing + 1 : inner.size
+        elsif char == ','
+          items << inner[start...index]
+          start = index + 1
+          index += 1
+        else
+          index += 1
+        end
+      end
+      items << inner[start..]
+      items
     end
 
     # SHA256 hex digest over the meaningful fields (not id/slug/path), used by
@@ -193,16 +287,62 @@ module Engram
       String.build do |str|
         str << "---\n"
         str << "id: " << id << '\n'
-        str << "title: " << title << '\n'
-        str << "topics: [" << topics.join(", ") << "]\n"
+        str << "title: " << serialize_scalar(title) << '\n'
+        str << "topics: [" << topics.map { |topic| serialize_array_item(topic) }.join(", ") << "]\n"
         str << "supersedes: [" << supersedes.join(", ") << "]\n"
         if author_value = author
-          str << "author: " << author_value << '\n'
+          str << "author: " << serialize_scalar(author_value) << '\n'
         end
         str << "---\n\n"
         str << body
         str << '\n'
       end
+    end
+
+    # True if *value* would be silently corrupted by the frontmatter scanner
+    # unless quoted: a " #" substring reads as an inline comment
+    # (`strip_inline_comment`), a leading quote character is mistaken for the
+    # start of an already-quoted scalar, a colon could be misread as another
+    # key/value delimiter by simpler downstream parsers, and a literal `\`
+    # needs escaping before the value can be safely quoted at all.
+    private def needs_scalar_quoting?(value : String) : Bool
+      value.includes?(" #") || value.starts_with?('"') || value.starts_with?('\'') ||
+        value.includes?(':') || value.includes?('\\')
+    end
+
+    # Everything `needs_scalar_quoting?` covers, plus the characters that are
+    # structural inside a flat `[a, b]` array: a comma would be misread as an
+    # item separator and a bracket as the array's boundary.
+    private def needs_array_item_quoting?(value : String) : Bool
+      needs_scalar_quoting?(value) || value.includes?(',') || value.includes?('[') || value.includes?(']')
+    end
+
+    # Backslash-escapes *value* so it can be safely wrapped in double quotes:
+    # `\` -> `\\`, `"` -> `\"`. `unescape_scalar` (parse side) reverses this.
+    private def escape_scalar(value : String) : String
+      String.build do |str|
+        value.each_char do |char|
+          case char
+          when '\\' then str << "\\\\"
+          when '"'  then str << "\\\""
+          else           str << char
+          end
+        end
+      end
+    end
+
+    private def quote_scalar(value : String) : String
+      %("#{escape_scalar(value)}")
+    end
+
+    # Quotes *value* only if leaving it bare would change its meaning on parse.
+    private def serialize_scalar(value : String) : String
+      needs_scalar_quoting?(value) ? quote_scalar(value) : value
+    end
+
+    # `serialize_scalar`, but for an item inside a `topics`/`supersedes`-style array.
+    private def serialize_array_item(value : String) : String
+      needs_array_item_quoting?(value) ? quote_scalar(value) : value
     end
 
     # Builds file content for a brand-new memory (used by `engram new`): a
@@ -249,9 +389,17 @@ module Engram
 
     # The next unused 14-digit migration id for *memories_dir*: the current UTC
     # time, bumped a second at a time until no existing `<id>_*.md` file already
-    # claims it. Shared by `engram new` (`Cli.next_migration_id`) and the MCP
-    # `remember` tool so that firing several `remember` calls within the same
-    # wall-clock second can never mint the same id twice.
+    # claims it, per a one-time directory scan.
+    #
+    # NOTE: this is a best-effort *peek*, not a claim -- two calls to `next_id`
+    # in the same wall-clock second (from two processes, or from `new`/
+    # `remember` racing each other) can and will return the same id, because
+    # nothing stops either caller's subsequent plain `File.write` from
+    # silently truncating whatever the other one just wrote. Anything that's
+    # actually about to create the migration file must use `claim_and_write`
+    # instead, which makes the id allocation and the file's creation a single
+    # atomic step. `next_id` remains only for callers that just want to know
+    # what id *would* be used next without writing anything.
     def self.next_id(memories_dir : String) : Int64
       existing = Dir.exists?(memories_dir) ? Dir.glob(File.join(memories_dir, "*.md")).map { |p| File.basename(p) } : [] of String
       time = Time.utc
@@ -259,6 +407,75 @@ module Engram
         id = time.to_s("%Y%m%d%H%M%S")
         return id.to_i64 unless existing.any?(&.starts_with?("#{id}_"))
         time = time + 1.second
+      end
+    end
+
+    # Atomically claims the next unused migration id for a memory whose
+    # filename slug is *slug* under *memories_dir*, and publishes the block's
+    # result as that file's content in one step. Returns `{id, path}`.
+    #
+    # This is the race-free replacement for the naive "`next_id` then
+    # `File.write`" pattern: that pattern has a TOCTOU gap where two callers
+    # (two processes, or two near-simultaneous `remember`/`new` calls) can
+    # both land on the same id in the same wall-clock second, and the second
+    # `File.write` truncates the first one's file with no error and no
+    # duplicate-id detection, because only one file ever ends up on disk.
+    #
+    # The id -- not the `<id>_<slug>.md` pathname -- is the memory's
+    # globally-unique key: two files sharing an id are a duplicate-id conflict
+    # even when their slugs (titles) differ, so a candidate id is rejected if
+    # ANY `<id>_*.md` already exists, not just one matching this exact slug.
+    # We combine two guards to that end:
+    #
+    # 1. A one-time directory snapshot (like `next_id`): a candidate whose
+    #    id-prefix already appears is skipped. This is what makes repeated
+    #    claims within the same second -- even with different slugs -- march
+    #    forward to distinct ids (the common, single-process case: `engram new`
+    #    twice, or an MCP session firing several `remember`s a second apart).
+    #
+    # 2. For each surviving candidate we write the block's result (the block
+    #    receives the candidate id, since the frontmatter embeds it) to a fresh
+    #    same-directory temp file, then `File.link` that temp file onto the
+    #    final `<id>_<slug>.md` path. `link(2)` is atomic with respect to
+    #    existence: if the target already exists -- because a *concurrent*
+    #    caller already claimed that exact id/slug pair after our snapshot --
+    #    the link fails with `File::AlreadyExistsError` and the existing file is
+    #    left completely untouched (the core defect this replaces: a plain
+    #    `File.write` would have silently truncated it). On that failure we
+    #    discard the temp, bump the id by a second, and retry; on success the
+    #    temp is unlinked (it was only ever a staging name) and `{id, path}` is
+    #    returned.
+    #
+    # *memories_dir* must already exist (same precondition as `next_id`;
+    # callers already `Dir.mkdir_p` it first). *start_time* defaults to
+    # `Time.utc` and exists so specs can freeze the clock to deterministically
+    # reproduce two claims racing in the same second.
+    def self.claim_and_write(memories_dir : String, slug : String, start_time : Time = Time.utc, & : Int64 -> String) : {Int64, String}
+      existing = Dir.exists?(memories_dir) ? Dir.children(memories_dir) : [] of String
+      time = start_time
+      loop do
+        id = time.to_s("%Y%m%d%H%M%S").to_i64
+        if existing.any?(&.starts_with?("#{id}_"))
+          time += 1.second
+          next
+        end
+
+        path = File.join(memories_dir, "#{id}_#{slug}.md")
+        content = yield id
+
+        tmp = File.tempfile("engram-claim", ".tmp", dir: memories_dir)
+        claimed = false
+        begin
+          tmp.print(content)
+          tmp.close
+          File.link(tmp.path, path)
+          claimed = true
+        rescue File::AlreadyExistsError
+          time += 1.second
+        ensure
+          File.delete(tmp.path) if File.exists?(tmp.path)
+        end
+        return {id, path} if claimed
       end
     end
 

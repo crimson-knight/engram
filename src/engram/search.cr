@@ -1,6 +1,7 @@
 require "db"
 require "sqlite3"
 require "json"
+require "./store"
 
 module Engram
   # A single ranked result from `Search#search` or `Search#recent`.
@@ -68,7 +69,10 @@ module Engram
     # populated via `Store` + `sync`). *embedder*, if given, turns query text into
     # a query embedding for cosine/RRF blending; omit it to search FTS5-only.
     def initialize(@db_path : String, @embedder : Embedder? = nil)
-      @db = DB.open("sqlite3://#{@db_path}")
+      # Build the connection URI via `Store` so a repo pathname containing `+`,
+      # `?`, `#`, `%`, or a space is percent-encoded into literal filename bytes
+      # rather than mis-decoded into a different path (or a driver crash).
+      @db = DB.open(Store.connection_uri(@db_path))
     end
 
     # Closes the underlying database connection.
@@ -78,8 +82,9 @@ module Engram
 
     # Full-text search over memories: bm25-ranked and recency-boosted, and RRF-fused
     # with cosine similarity over embeddings when the store has them and an embedder
-    # was supplied. A blank *query* degrades to newest-first (like `recent`). Superseded
-    # memories are excluded unless *include_superseded* is true.
+    # was supplied. A blank/whitespace *query* degrades to newest-first (like `recent`);
+    # a non-blank *query* with no matchable token (e.g. all-CJK, pure punctuation) returns
+    # no matches. Superseded memories are excluded unless *include_superseded* is true.
     def search(query : String, topic : String? = nil, limit : Int32 = 10, include_superseded : Bool = false) : Array(SearchResult)
       candidates = load_candidates(topic, include_superseded)
       return [] of SearchResult if candidates.empty?
@@ -89,7 +94,15 @@ module Engram
       oldest, newest = recency_bounds(candidates)
 
       tokens = sanitize_tokens(query)
-      return recency_only_results(candidates, oldest, newest, limit) if tokens.empty?
+      if tokens.empty?
+        # A truly blank/whitespace query degrades to newest-first (like `recent`).
+        # But a *non-blank* query that tokenizes to nothing — an all-CJK "数据库",
+        # a pure-punctuation "!!!", anything with no [a-z0-9_] run — is a real
+        # search with no matchable token, and must honestly report "no matches"
+        # rather than masquerade as a recency listing of unrelated newest memories.
+        return recency_only_results(candidates, oldest, newest, limit) if query.strip.empty?
+        return [] of SearchResult
+      end
 
       fts_scores = fts_scores_for(tokens, by_id, oldest, newest)
       cosine_scores = embeddable?(candidates) ? cosine_scores_for(query, candidates) : nil

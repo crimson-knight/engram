@@ -241,6 +241,85 @@ migration file currently exist? That's Rails' `schema_migrations` model,
 not a `schema_version` counter, and it's why branches can reorder memories
 freely without engram ever getting confused.
 
+## Known limitations (v0.1)
+
+These are real, deliberately-scoped edges an adversarial review surfaced. None
+of them risk the source of truth — your committed `.agents/memories/*.md`
+files — and most require hand-authored input no normal workflow produces.
+They're documented here rather than fixed for v0.1; each is cheap to harden
+later.
+
+- **The scanner trusts the filesystem.** It follows symlinks and non-regular
+  files: a tracked `.md` symlink is dereferenced by `File.read` (content from
+  outside git), a symlinked `memories/` directory undermines source-of-truth,
+  and a device/FIFO `.md` could hang the process. Reaching this takes
+  deliberately symlinking memory files or the memories directory — no normal
+  workflow does — and committed regular files are unaffected. An `lstat` guard
+  is planned.
+
+- **Timestamp ids aren't validated, and the recency boost isn't linear.** Any
+  14 digits are accepted as an id (e.g. `20269999999999`), and the recency
+  boost subtracts raw `YYYYMMDDHHMMSS` decimals rather than real timestamps, so
+  the boost's magnitude jumps non-linearly across minute/day/month/year
+  boundaries. Id *ordering* stays correct, so newest-first/recency ordering is
+  still right; only the boost magnitude — a heuristic tiebreaker (w=1.0) — is
+  affected. A search-quality nuance, not a correctness or data issue.
+
+- **Supersession graphs are accepted uncritically.** Newer-than-self ids,
+  self-references (silently ignored), duplicates, and cycles are all allowed. A
+  two-node cycle marks both memories superseded and can hide the whole active
+  set; multiple superseders resolve to the highest id with no documented
+  policy. This requires hand-authoring memories that supersede each other or
+  forward-reference newer ids. Nothing is lost — the files are intact, and
+  hidden memories reappear with `--all` or by fixing the `supersedes:` lists.
+
+- **Embedding-cache invalidation is coarse.** With the opt-in embeddings
+  feature enabled: turning embeddings on after an FTS-only sync won't embed
+  unchanged rows; editing a memory while embeddings are *off* keeps the old
+  vector; a same-dimension model swap goes undetected; and a partial
+  dimension-migration failure still records the new dimension. All four are
+  fully corrected by the documented, idempotent recovery: **delete the
+  disposable cache (`.git/engram.db`) and re-sync**, which re-embeds
+  everything. FTS search and the source files are never affected. Embeddings
+  are off by default.
+
+- **The hand-rolled MCP server is intentionally lenient about JSON-RPC.** It
+  doesn't enforce the full lifecycle (it accepts `tools/call` before
+  `initialize`), a notification-form (`id`-less) `ping`/`tools/list`/
+  `tools/call` still gets a spurious `"id": null` reply, a valid object missing
+  `method` is reported as `-32700` instead of `-32600`, missing `initialize`
+  params default to the newest protocol version, and `tools/call` surfaces
+  unknown-tool/bad-envelope errors as `isError` results while an in-tool
+  runtime failure escapes as `-32603`. Every one of these paths is unreachable
+  from a compliant client — real clients always send well-formed,
+  `id`-bearing, in-order requests — so the happy path is correct. Being *more*
+  permissive than the spec never breaks a conforming client. A strict state
+  machine and error-code layering are future rigor.
+
+- **Appending to a pre-existing hook file is best-effort.** The common case (no
+  pre-existing `post-checkout`/`post-merge`/`post-rewrite`) writes a fresh
+  `#!/bin/sh` file and is safe; installs now resolve the effective hooks
+  directory via `git` (honoring `core.hooksPath` and linked worktrees) and mark
+  hooks executable. But appending our block to a *non-trivial existing* hook
+  can still be unreachable after a prior `exit`/`exec`, assumes a POSIX shell,
+  relies on the noninteractive hook `PATH` finding `engram`, and rewrites
+  non-atomically.
+
+- **Stated test coverage is narrower than exhaustive.** `docs/SPEC.md`'s spec
+  (test) requirements do not exercise every adversarial edge listed here —
+  failpoint/transaction interruption, multi-process races beyond the ones we do
+  test, adversarial YAML fuzzing, calendar-boundary ids, Unicode/FTS fuzzing,
+  full JSON-RPC conformance, or real hook execution under git. Core behaviors
+  (parse/serialize round-trip, sync set-diff, corrupted/deleted-cache recovery,
+  concurrent-claim id allocation, path escaping, hook resolution) *are* covered
+  by `crystal spec`.
+
+- **`--verbose` shows changed ids, not error detail.** On `sync` it prints each
+  applied/rolled-back/updated id; it does not add stack-trace-level detail to
+  error output (all command errors get the same one-line, actionable message
+  regardless of the flag). This is intentional — engram never prints stack
+  traces to users.
+
 ## Repository layout
 
 ```

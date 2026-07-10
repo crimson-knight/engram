@@ -160,6 +160,25 @@ describe Engram::Sync do
       end
     end
 
+    it "rebuilds a corrupted (garbage-byte) database from the working tree on the next sync" do
+      with_temp_repo do |dir|
+        write_memory(dir, ID_A, "Persisted decision")
+        store = Engram::Store.new(db_path(dir))
+        Engram::Sync.run(memories_dir(dir), store)
+        store.close
+
+        File.write(db_path(dir), Random::Secure.random_bytes(4096))
+
+        rebuilt_store = Engram::Store.new(db_path(dir))
+        result = Engram::Sync.run(memories_dir(dir), rebuilt_store)
+        ids = rebuilt_store.all_ids
+        rebuilt_store.close
+
+        result.applied.should eq([ID_A])
+        ids.should eq([ID_A])
+      end
+    end
+
     it "raises Engram::DuplicateIdError naming both paths when two files share an id" do
       with_temp_repo do |dir|
         path_a = write_memory(dir, ID_A, "First title")

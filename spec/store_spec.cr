@@ -222,4 +222,198 @@ describe Engram::Store do
       end
     end
   end
+
+  describe "connection URI escaping" do
+    it "opens the exact intended file when the path contains characters the sqlite3 URI driver would otherwise mis-decode" do
+      SpecHelper.with_tempdir do |dir|
+        weird_dir = File.join(dir, "has +space%percent?question#hash")
+        Dir.mkdir_p(weird_dir)
+        path = File.join(weird_dir, "engram.db")
+
+        store = Engram::Store.new(path)
+        store.insert_memory(
+          id: 1_i64, slug: "a", title: "A", topics: [] of String, author: nil,
+          body: "body", supersedes: [] of Int64, file_path: "a.md"
+        )
+        store.close
+
+        # The file was created at the exact path asked for, not some mis-decoded
+        # neighbor (a bare `"sqlite3://#{path}"` interpolation turns `+` into a
+        # space, and lets `?`/`#` start URI query/fragment parsing instead of
+        # naming the file).
+        File.exists?(path).should be_true
+        Dir.children(dir).should eq([File.basename(weird_dir)])
+
+        reopened = Engram::Store.new(path)
+        ids = reopened.all_ids
+        reopened.close
+
+        ids.should eq([1_i64])
+      end
+    end
+  end
+
+  describe "corrupted cache recovery" do
+    it "self-heals a database file containing random garbage bytes instead of raising" do
+      SpecHelper.with_tempdir do |dir|
+        path = db_path(dir)
+        File.write(path, Random::Secure.random_bytes(4096))
+
+        store = Engram::Store.new(path)
+        ids_before_write = store.all_ids
+        store.insert_memory(
+          id: 1_i64, slug: "a", title: "A", topics: [] of String, author: nil,
+          body: "body", supersedes: [] of Int64, file_path: "a.md"
+        )
+        record = store.get(1_i64)
+        store.close
+
+        ids_before_write.should eq([] of Int64)
+        record.should_not be_nil
+      end
+    end
+
+    it "self-heals a truncated database file (valid header, missing pages) instead of raising" do
+      SpecHelper.with_tempdir do |dir|
+        path = db_path(dir)
+        seed = Engram::Store.new(path)
+        seed.insert_memory(
+          id: 1_i64, slug: "a", title: "A", topics: [] of String, author: nil,
+          body: "a" * 500, supersedes: [] of Int64, file_path: "a.md"
+        )
+        seed.close
+
+        full = File.open(path, "rb") { |f| bytes = Bytes.new(f.size); f.read_fully(bytes); bytes }
+        File.write(path, full[0, 50])
+
+        store = Engram::Store.new(path)
+        ids = store.all_ids
+        store.close
+
+        ids.should eq([] of Int64)
+      end
+    end
+  end
+
+  describe ".corruption_error?" do
+    it "is true for a real error raised against a garbage-byte file" do
+      SpecHelper.with_tempdir do |dir|
+        path = db_path(dir)
+        File.write(path, Random::Secure.random_bytes(2048))
+
+        db = DB.open(Engram::Store.connection_uri(path))
+        ex = expect_raises(SQLite3::Exception) { db.exec("CREATE TABLE IF NOT EXISTS t (id INTEGER)") }
+        db.close
+
+        Engram::Store.corruption_error?(ex).should be_true
+      end
+    end
+
+    it "is false for a real lock/busy error, so a merely-contended database is never mistaken for corrupt" do
+      SpecHelper.with_tempdir do |dir|
+        path = db_path(dir)
+        holder = Engram::Store.new(path)
+
+        caught = nil.as(SQLite3::Exception?)
+        holder.transaction do
+          holder.insert_memory(
+            id: 1_i64, slug: "a", title: "A", topics: [] of String, author: nil,
+            body: "a", supersedes: [] of Int64, file_path: "a.md"
+          )
+
+          contender = DB.open(Engram::Store.connection_uri(path, busy_timeout_ms: 100))
+          begin
+            contender.exec(
+              "INSERT INTO memories (id, slug, title, topics, author, body, supersedes, embedding, file_path, applied_at) " \
+              "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              2_i64, "b", "B", "", nil, "b", "", nil, "b.md", Time.utc.to_rfc3339
+            )
+          rescue e : SQLite3::Exception
+            caught = e
+          end
+          # The failed statement can leave this throwaway connection unable to close
+          # cleanly (closing it re-attempts the still-locked statement); irrelevant to
+          # what this spec is proving, so swallow it rather than let it mask `caught`.
+          contender.close rescue nil
+        end
+        holder.close
+
+        ex = caught.not_nil!
+        ex.message.to_s.should match(/locked/)
+        Engram::Store.corruption_error?(ex).should be_false
+
+        # And the database itself was left alone by the contention: reopening still
+        # sees exactly the row `holder` committed, nothing rebuilt or lost.
+        reopened = Engram::Store.new(path)
+        ids = reopened.all_ids
+        reopened.close
+
+        ids.should eq([1_i64])
+      end
+    end
+  end
+
+  describe "#transaction" do
+    it "commits every write made inside the block together" do
+      SpecHelper.with_tempdir do |dir|
+        store = Engram::Store.new(db_path(dir))
+        store.transaction do
+          store.insert_memory(id: 1_i64, slug: "a", title: "A", topics: [] of String, author: nil, body: "a", supersedes: [] of Int64, file_path: "a.md")
+          store.insert_memory(id: 2_i64, slug: "b", title: "B", topics: [] of String, author: nil, body: "b", supersedes: [] of Int64, file_path: "b.md")
+        end
+        ids = store.all_ids
+        store.close
+
+        ids.sort.should eq([1_i64, 2_i64])
+      end
+    end
+
+    it "rolls back every write made inside the block if it raises, leaving no partially-applied state" do
+      SpecHelper.with_tempdir do |dir|
+        store = Engram::Store.new(db_path(dir))
+        store.insert_memory(id: 1_i64, slug: "already-there", title: "Already there", topics: [] of String, author: nil, body: "x", supersedes: [] of Int64, file_path: "a.md")
+
+        expect_raises(Exception, "boom") do
+          store.transaction do
+            store.insert_memory(id: 2_i64, slug: "b", title: "B", topics: [] of String, author: nil, body: "b", supersedes: [] of Int64, file_path: "b.md")
+            store.delete_memory(1_i64)
+            raise "boom"
+          end
+        end
+
+        ids = store.all_ids
+        store.close
+
+        ids.should eq([1_i64])
+      end
+    end
+
+    it "sets a busy_timeout pragma so a contended write retries for a bounded window instead of failing instantly" do
+      SpecHelper.with_tempdir do |dir|
+        path = db_path(dir)
+        store = Engram::Store.new(path)
+
+        elapsed = Time.measure do
+          store.transaction do
+            store.insert_memory(id: 1_i64, slug: "a", title: "A", topics: [] of String, author: nil, body: "a", supersedes: [] of Int64, file_path: "a.md")
+
+            contender = DB.open(Engram::Store.connection_uri(path, busy_timeout_ms: 150))
+            expect_raises(SQLite3::Exception, /locked/) do
+              contender.exec(
+                "INSERT INTO memories (id, slug, title, topics, author, body, supersedes, embedding, file_path, applied_at) " \
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                2_i64, "b", "B", "", nil, "b", "", nil, "b.md", Time.utc.to_rfc3339
+              )
+            end
+            # See the note in the ".corruption_error?" spec above: closing this
+            # throwaway connection can itself re-hit the lock; not what's under test.
+            contender.close rescue nil
+          end
+        end
+        store.close
+
+        elapsed.should be >= 100.milliseconds
+      end
+    end
+  end
 end

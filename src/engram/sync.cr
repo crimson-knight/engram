@@ -47,10 +47,20 @@ module Engram
       stored_ids = store.all_ids.to_set
       file_ids = files_by_id.keys.to_set
 
-      rolled_back = rollback_missing(store, stored_ids, file_ids)
-      applied, updated = apply_and_update(memories_dir, store, files_by_id, stored_ids, embedder)
+      # Reads plus (for anything new or changed) an embedder HTTP call happen here, before any
+      # transaction opens — never hold sqlite's write lock across the network. Nothing below
+      # this point touches the network again.
+      plan = plan_apply_and_update(memories_dir, store, files_by_id, stored_ids, embedder)
 
-      recompute_superseded_by(store, files_by_id)
+      rolled_back = [] of Int64
+      store.transaction do
+        rolled_back = rollback_missing(store, stored_ids, file_ids)
+        apply_plan(store, plan)
+        recompute_superseded_by(store, files_by_id)
+      end
+
+      applied = plan.select(&.applied).map(&.id)
+      updated = plan.reject(&.applied).map(&.id)
       reembed_on_dimension_change(store, embedder, files_by_id, applied, updated) if embedder
 
       SyncResult.new(
@@ -74,14 +84,21 @@ module Engram
       ids
     end
 
-    # Inserts memories that are new to the store and re-applies ones whose content, slug, or
-    # path changed; returns (applied, updated) ids. `file_path` is always stored repo-relative
-    # (docs/SPEC.md's schema contract), derived from *memories_dir* rather than the tree-walk's
-    # absolute path.
-    private def self.apply_and_update(memories_dir : String, store : Store, files_by_id : Hash(Int64, MemoryFile),
-                                      stored_ids : Set(Int64), embedder : Embedder?) : {Array(Int64), Array(Int64)}
-      applied = [] of Int64
-      updated = [] of Int64
+    # One memory this sync will insert or re-apply, already carrying its (possibly
+    # network-fetched) embedding — built entirely before the mutation transaction opens, so
+    # applying it is a pure, fast DB write with no further reads or HTTP calls.
+    private record PlannedChange, id : Int64, memory : MemoryFile, relative_path : String,
+      embedding : Bytes?, applied : Bool
+
+    # Determines which files are new to the store and which changed (content, slug, or path),
+    # computing an embedding for each via *embedder* — the only phase that reads the store or
+    # calls the network, and it does both before any transaction is open. Returns the plan in
+    # ascending-id order; applying it is `apply_plan`'s job. `file_path` is always stored
+    # repo-relative (docs/SPEC.md's schema contract), derived from *memories_dir* rather than
+    # the tree-walk's absolute path.
+    private def self.plan_apply_and_update(memories_dir : String, store : Store, files_by_id : Hash(Int64, MemoryFile),
+                                           stored_ids : Set(Int64), embedder : Embedder?) : Array(PlannedChange)
+      plan = [] of PlannedChange
 
       files_by_id.keys.sort.each do |id|
         memory = files_by_id[id]
@@ -92,24 +109,35 @@ module Engram
           next unless content_changed?(memory, existing, relative_path)
 
           embedding = embedder.try(&.embed(embed_text(memory))) || existing.embedding
-          store.update_memory(
-            id: memory.id, slug: memory.slug, title: memory.title, topics: memory.topics,
-            author: memory.author, body: memory.body, supersedes: memory.supersedes,
-            file_path: relative_path, embedding: embedding,
-          )
-          updated << id
+          plan << PlannedChange.new(id: id, memory: memory, relative_path: relative_path, embedding: embedding, applied: false)
         else
           embedding = embedder.try(&.embed(embed_text(memory)))
-          store.insert_memory(
-            id: memory.id, slug: memory.slug, title: memory.title, topics: memory.topics,
-            author: memory.author, body: memory.body, supersedes: memory.supersedes,
-            file_path: relative_path, embedding: embedding,
-          )
-          applied << id
+          plan << PlannedChange.new(id: id, memory: memory, relative_path: relative_path, embedding: embedding, applied: true)
         end
       end
 
-      {applied, updated}
+      plan
+    end
+
+    # Writes out *plan* (from `plan_apply_and_update`) — insert or update only, no reads and
+    # no network calls, so it's safe to run inside `store.transaction`.
+    private def self.apply_plan(store : Store, plan : Array(PlannedChange)) : Nil
+      plan.each do |change|
+        memory = change.memory
+        if change.applied
+          store.insert_memory(
+            id: memory.id, slug: memory.slug, title: memory.title, topics: memory.topics,
+            author: memory.author, body: memory.body, supersedes: memory.supersedes,
+            file_path: change.relative_path, embedding: change.embedding,
+          )
+        else
+          store.update_memory(
+            id: memory.id, slug: memory.slug, title: memory.title, topics: memory.topics,
+            author: memory.author, body: memory.body, supersedes: memory.supersedes,
+            file_path: change.relative_path, embedding: change.embedding,
+          )
+        end
+      end
     end
 
     # True when *memory*'s content differs from the *existing* stored record, OR when the file
@@ -162,7 +190,7 @@ module Engram
     #
     # `embedder.dimension` is only ever populated as a side effect of calling
     # `embed()` — but a no-op sync (nothing on disk changed) never calls
-    # `embed()` at all via `apply_and_update`, so a dimension change (e.g. the
+    # `embed()` at all via `plan_apply_and_update`, so a dimension change (e.g. the
     # embedding model behind the same endpoint got upgraded between agent
     # runs) would otherwise go undetected for as many no-op syncs as it takes
     # before some file finally changes. When a dimension was already recorded

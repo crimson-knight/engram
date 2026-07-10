@@ -290,13 +290,16 @@ module Engram
       supersedes = int64_array(args["supersedes"]?, "supersedes")
 
       Dir.mkdir_p(@memories_dir) unless Dir.exists?(@memories_dir)
-      memory_id = MemoryFile.next_id(@memories_dir)
-      memory = MemoryFile.new(
-        id: memory_id, slug: MemoryFile.slugify(title), title: title, topics: topics,
-        supersedes: supersedes, author: nil, body: body, file_path: ""
-      )
-      path = File.join(@memories_dir, memory.filename)
-      File.write(path, memory.serialize)
+      slug = MemoryFile.slugify(title)
+      # Claim the id and write the file atomically (see `MemoryFile.claim_and_write`):
+      # a `remember` racing another `remember`/`new` in the same second gets a
+      # distinct id instead of silently overwriting the other's migration file.
+      memory_id, path = MemoryFile.claim_and_write(@memories_dir, slug) do |candidate_id|
+        MemoryFile.new(
+          id: candidate_id, slug: slug, title: title, topics: topics,
+          supersedes: supersedes, author: nil, body: body, file_path: ""
+        ).serialize
+      end
       @run_sync.call
 
       relative_path = MemoryFile.repo_relative_path(@memories_dir, path)

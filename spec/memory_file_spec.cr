@@ -237,6 +237,91 @@ describe Engram::MemoryFile do
         MD
       memory.serialize.should_not contain("author:")
     end
+
+    it "round-trips a title containing ' #' without truncating it at the hash" do
+      memory = Engram::MemoryFile.new(
+        id: 20260710153000_i64, slug: "reason-2", title: "Reason #2 for choosing X",
+        topics: [] of String, supersedes: [] of Int64, author: nil, body: "Body.", file_path: "",
+      )
+      reparsed = Engram::MemoryFile.parse(memory.serialize, memory.filename)
+      reparsed.title.should eq("Reason #2 for choosing X")
+    end
+
+    it "round-trips a title that starts with an embedded quote character" do
+      memory = Engram::MemoryFile.new(
+        id: 20260710153000_i64, slug: "quoted-title", title: %q("Special" release notes),
+        topics: [] of String, supersedes: [] of Int64, author: nil, body: "Body.", file_path: "",
+      )
+      reparsed = Engram::MemoryFile.parse(memory.serialize, memory.filename)
+      reparsed.title.should eq(%q("Special" release notes))
+    end
+
+    it "round-trips a topic containing a comma as a single item, not two" do
+      memory = Engram::MemoryFile.new(
+        id: 20260710153000_i64, slug: "comma-topic", title: "Comma in topic",
+        topics: ["a, b", "c"], supersedes: [] of Int64, author: nil, body: "Body.", file_path: "",
+      )
+      reparsed = Engram::MemoryFile.parse(memory.serialize, memory.filename)
+      reparsed.topics.should eq(["a, b", "c"])
+    end
+
+    it "preserves leading indentation on a body that starts with an indented code block" do
+      body = "    def foo\n      bar\n    end"
+      memory = Engram::MemoryFile.new(
+        id: 20260710153000_i64, slug: "indented-body", title: "Indented body",
+        topics: [] of String, supersedes: [] of Int64, author: nil, body: body, file_path: "",
+      )
+      reparsed = Engram::MemoryFile.parse(memory.serialize, memory.filename)
+      reparsed.body.should eq(body)
+    end
+
+    it "preserves blank lines surrounding the body beyond the single mandatory separator" do
+      body = "\nFirst line has a blank line above it.\n\nAnd a trailing blank line below.\n"
+      memory = Engram::MemoryFile.new(
+        id: 20260710153000_i64, slug: "blank-lines", title: "Blank lines",
+        topics: [] of String, supersedes: [] of Int64, author: nil, body: body, file_path: "",
+      )
+      reparsed = Engram::MemoryFile.parse(memory.serialize, memory.filename)
+      reparsed.body.should eq(body)
+    end
+  end
+
+  describe ".claim_and_write" do
+    it "never silently overwrites: two claims racing on an identical title in the same frozen second get different ids" do
+      SpecHelper.with_tempdir do |dir|
+        frozen = Time.utc(2026, 7, 10, 15, 30, 0)
+        title = "Same Title Race"
+        slug = Engram::MemoryFile.slugify(title)
+
+        id_a, path_a = Engram::MemoryFile.claim_and_write(dir, slug, frozen) { |id| Engram::MemoryFile.scaffold(id, title) }
+        id_b, path_b = Engram::MemoryFile.claim_and_write(dir, slug, frozen) { |id| Engram::MemoryFile.scaffold(id, title) }
+
+        # No silent last-writer-wins clobber: the second claim got a bumped
+        # id (not the same one), a distinct path, and both files persist with
+        # their own correct, uncorrupted content.
+        id_a.should_not eq(id_b)
+        id_b.should eq(id_a + 1)
+        path_a.should_not eq(path_b)
+
+        File.exists?(path_a).should be_true
+        File.exists?(path_b).should be_true
+        Engram::MemoryFile.parse(File.read(path_a), path_a).id.should eq(id_a)
+        Engram::MemoryFile.parse(File.read(path_b), path_b).id.should eq(id_b)
+
+        # No stray staging temp files left behind in the memories dir.
+        Dir.glob(File.join(dir, "*")).map { |p| File.basename(p) }.sort.should eq(
+          ["#{id_a}_#{slug}.md", "#{id_b}_#{slug}.md"].sort
+        )
+      end
+    end
+
+    it "claims the id the block actually receives, not a stale one computed beforehand" do
+      SpecHelper.with_tempdir do |dir|
+        slug = "check-id"
+        id, path = Engram::MemoryFile.claim_and_write(dir, slug) { |claimed_id| "id was #{claimed_id}" }
+        File.read(path).should eq("id was #{id}")
+      end
+    end
   end
 
   describe ".slugify" do
