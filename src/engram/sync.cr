@@ -158,14 +158,31 @@ module Engram
 
     # If the embedder's output dimension differs from the one last recorded
     # in `engram_meta`, re-embeds every active memory that this pass didn't
-    # already (re-)embed, then records the new dimension. A no-op when the
-    # embedder never produced a vector this pass (nothing to compare).
+    # already (re-)embed, then records the new dimension.
+    #
+    # `embedder.dimension` is only ever populated as a side effect of calling
+    # `embed()` — but a no-op sync (nothing on disk changed) never calls
+    # `embed()` at all via `apply_and_update`, so a dimension change (e.g. the
+    # embedding model behind the same endpoint got upgraded between agent
+    # runs) would otherwise go undetected for as many no-op syncs as it takes
+    # before some file finally changes. When a dimension was already recorded
+    # from a previous sync, probe the embedder once against an arbitrary
+    # memory purely to learn its current dimension, so the comparison below
+    # still fires even when nothing else this pass would have called it.
     private def self.reembed_on_dimension_change(store : Store, embedder : Embedder, files_by_id : Hash(Int64, MemoryFile),
                                                  applied : Array(Int64), updated : Array(Int64)) : Nil
+      previous_dimension = store.meta("embedding_dimension")
+
       new_dimension = embedder.dimension
+      probed_id = nil.as(Int64?)
+      probed_embedding = nil.as(Bytes?)
+      if new_dimension.nil? && previous_dimension && !files_by_id.empty?
+        probed_id, probed_memory = files_by_id.first
+        probed_embedding = embedder.embed(embed_text(probed_memory))
+        new_dimension = embedder.dimension
+      end
       return unless new_dimension
 
-      previous_dimension = store.meta("embedding_dimension")
       if previous_dimension && previous_dimension.to_i != new_dimension
         STDERR.puts "engram: warning: embedding dimension changed from #{previous_dimension} to #{new_dimension}; re-embedding all memories"
 
@@ -173,7 +190,7 @@ module Engram
         files_by_id.each do |id, memory|
           next if already_embedded.includes?(id)
 
-          embedding = embedder.embed(embed_text(memory))
+          embedding = id == probed_id ? probed_embedding : embedder.embed(embed_text(memory))
           next unless embedding
 
           record = store.get(id).not_nil!

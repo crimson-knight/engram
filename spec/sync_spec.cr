@@ -383,5 +383,39 @@ describe Engram::Sync do
         dimension_meta.should eq("3")
       end
     end
+
+    it "detects a dimension change even on a no-op sync (no files changed), by probing the embedder" do
+      with_temp_repo do |dir|
+        write_memory(dir, ID_A, "First memory")
+        write_memory(dir, ID_B, "Second memory")
+        store = Engram::Store.new(db_path(dir))
+
+        small_embedder = fake_embedder { |_, _| [1.0_f32, 2.0_f32] }
+        Engram::Sync.run(memories_dir(dir), store, small_embedder)
+
+        # First no-op sync: nothing on disk changed, and the embedder's
+        # dimension hasn't changed either — nothing should be re-embedded.
+        Engram::Sync.run(memories_dir(dir), store, small_embedder)
+        first_after_stable = store.get(ID_A).not_nil!
+        unpack(first_after_stable.embedding.not_nil!).size.should eq(2)
+
+        # Second no-op sync: still nothing on disk changed, but the fake
+        # embedder now reports a bigger dimension (simulating the endpoint's
+        # model changing between agent runs). `apply_and_update` embeds
+        # nothing on its own here since no file content changed, so this can
+        # only be caught by probing the embedder directly.
+        big_embedder = fake_embedder { |_, _| [1.0_f32, 2.0_f32, 3.0_f32, 4.0_f32] }
+        Engram::Sync.run(memories_dir(dir), store, big_embedder)
+
+        first = store.get(ID_A).not_nil!
+        second = store.get(ID_B).not_nil!
+        dimension_meta = store.meta("embedding_dimension")
+        store.close
+
+        unpack(first.embedding.not_nil!).size.should eq(4)
+        unpack(second.embedding.not_nil!).size.should eq(4)
+        dimension_meta.should eq("4")
+      end
+    end
   end
 end

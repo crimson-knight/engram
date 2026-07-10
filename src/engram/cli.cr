@@ -467,15 +467,19 @@ module Engram
       end
 
       config_path = File.join(repo_root, CONFIG_FILE)
+      config_failed = false
       embedder_config = begin
         EmbedderConfig.load(config_path)
       rescue ex : EmbedderConfigError
         @stdout.puts "[fail] #{ex.message}"
         ok = false
+        config_failed = true
         nil
       end
 
-      if embedder_config.nil?
+      if config_failed
+        # Already reported as a [fail] line above; nothing more to print.
+      elsif embedder_config.nil?
         @stdout.puts "[ok] no embedder configured (FTS5-only search)"
       elsif self.class.embedder_reachable?(embedder_config)
         @stdout.puts "[ok] embedder reachable at #{embedder_config.url}"
