@@ -1,6 +1,8 @@
 require "spec"
 require "file_utils"
-require "../src/engram"
+require "../src/engram/version"
+require "../src/engram/memory_file"
+require "../src/engram/store"
 
 module SpecHelper
   # Creates a fresh temp directory for a spec example and yields its path; always cleans up after.
