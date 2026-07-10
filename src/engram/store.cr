@@ -63,7 +63,7 @@ module Engram
       @db.exec(
         "INSERT INTO memories (id, slug, title, topics, author, body, supersedes, embedding, file_path, applied_at) " \
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        id, slug, title, topics.join(","), author, body, supersedes.join(","), embedding, file_path, applied_at.to_rfc3339
+        id, slug, title, lowercase_csv(topics), author, body, supersedes.join(","), embedding, file_path, applied_at.to_rfc3339
       )
     end
 
@@ -74,7 +74,7 @@ module Engram
       result = @db.exec(
         "UPDATE memories SET slug = ?, title = ?, topics = ?, author = ?, body = ?, supersedes = ?, " \
         "embedding = ?, file_path = ?, applied_at = ? WHERE id = ?",
-        slug, title, topics.join(","), author, body, supersedes.join(","), embedding, file_path, applied_at.to_rfc3339, id
+        slug, title, lowercase_csv(topics), author, body, supersedes.join(","), embedding, file_path, applied_at.to_rfc3339, id
       )
       raise MemoryNotFoundError.new(id) if result.rows_affected == 0
     end
@@ -146,6 +146,12 @@ module Engram
     # Splits a comma-joined column back into its parts, treating an empty string as no parts.
     private def split_csv(value : String) : Array(String)
       value.empty? ? [] of String : value.split(',')
+    end
+
+    # Lowercases and comma-joins *topics* for storage, honoring the schema's documented
+    # `topics TEXT ... -- comma-joined, lowercased` invariant (docs/SPEC.md).
+    private def lowercase_csv(topics : Array(String)) : String
+      topics.map(&.downcase).join(",")
     end
 
     # Creates the memories table, the FTS5 index and its sync triggers, and the meta table, if they don't already exist.

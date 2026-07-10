@@ -173,8 +173,13 @@ module Engram
 
     # SHA256 hex digest over the meaningful fields (not id/slug/path), used by
     # sync to detect whether a memory's content changed since it was applied.
+    # Topics are lowercased in the canonical string to match how `Store`
+    # persists them (docs/SPEC.md: "comma-joined, lowercased") — otherwise a
+    # memory whose frontmatter uses mixed-case topics would hash differently
+    # from the record read back from the store and sync would treat it as
+    # perpetually changed.
     def content_hash : String
-      canonical = [title, topics.join(","), supersedes.join(","), author || "", body].join(' ')
+      canonical = [title, topics.map(&.downcase).join(","), supersedes.join(","), author || "", body].join(' ')
       Digest::SHA256.hexdigest(canonical)
     end
 

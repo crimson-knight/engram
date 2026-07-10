@@ -250,6 +250,7 @@ module Engram
 
       repo_root = self.class.find_repo_root(Dir.current)
       db_path = self.class.db_path_for(repo_root)
+      self.class.ensure_schema(db_path)
       embedder_proc = self.class.search_embedder_proc(repo_root)
       search = Search.new(db_path, embedder: embedder_proc)
       results = begin
@@ -280,6 +281,7 @@ module Engram
 
       repo_root = self.class.find_repo_root(Dir.current)
       db_path = self.class.db_path_for(repo_root)
+      self.class.ensure_schema(db_path)
       search = Search.new(db_path)
       results = begin
         search.recent(topic: topic, limit: limit)
@@ -549,6 +551,15 @@ module Engram
     # The per-clone SQLite cache path: `<git dir>/engram.db`.
     def self.db_path_for(repo_root : String) : String
       File.join(git_dir_for(repo_root), "engram.db")
+    end
+
+    # Guarantees the sqlite schema exists at *db_path* before a read-only command (`search`,
+    # `recent`) opens its own `Search` connection — `Search` never creates tables itself, only
+    # `Store` does. On a fresh repo where `init`/`sync` never ran, this keeps first-run
+    # `search`/`recent` a clean "No memories found." (exit 0) instead of leaking sqlite's raw
+    # "no such table: memories" as an uncaught exception (exit 2).
+    def self.ensure_schema(db_path : String) : Nil
+      Store.new(db_path).close
     end
 
     # Loads `.agents/engram.yml`'s embedder config (if any) and wraps it in a real HTTP-backed Embedder.

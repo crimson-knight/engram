@@ -11,10 +11,24 @@ require "json"
 # if `bin/` doesn't exist yet.
 private BINARY_PATH = File.expand_path("../bin/engram", __DIR__)
 
+private def project_root : String
+  File.expand_path("..", __DIR__)
+end
+
+# True if *BINARY_PATH* is at least as new as every `.cr` file under `src/` —
+# i.e. nothing has changed since it was last built and a rebuild would be a
+# no-op. A missing binary is never "up to date".
+private def binary_up_to_date? : Bool
+  return false unless File.exists?(BINARY_PATH)
+  binary_mtime = File.info(BINARY_PATH).modification_time
+  Dir.glob(File.join(project_root, "src", "**", "*.cr")).all? do |path|
+    File.info(path).modification_time <= binary_mtime
+  end
+end
+
 private def ensure_binary_built : Nil
-  return if File.exists?(BINARY_PATH)
+  return if binary_up_to_date?
   Dir.mkdir_p(File.dirname(BINARY_PATH))
-  project_root = File.expand_path("..", __DIR__)
   status = Process.run("crystal", ["build", "src/engram.cr", "-o", BINARY_PATH], chdir: project_root,
     output: STDOUT, error: STDERR)
   status.success?.should be_true
