@@ -1,9 +1,8 @@
 {
   "mcpServers": {
     "engram": {
-      "command": "engram",
-      "args": ["mcp"],
-      "transport": "stdio"
+      "command": "/absolute/path/to/bin/engram",
+      "args": ["mcp"]
     }
   }
 }

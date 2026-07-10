@@ -36,9 +36,28 @@ scratch at any time.
 
 ## 90-second quickstart
 
+Prerequisites: [Crystal](https://crystal-lang.org/install/) >= 1.11.2 and its
+`shards` package manager (both come together in the standard install), a C
+toolchain (Xcode Command Line Tools on macOS; `build-essential` on Debian/
+Ubuntu), and network access to github.com the first time you build (to fetch
+the two dependencies below). See [Tested environment](docs/TESTED_ENVIRONMENT.md)
+for the exact versions this was built and verified against, and what's
+untested.
+
 ```sh
-# 1. Build (or grab a release binary) and put it on your PATH.
+# 1. Fetch dependencies, then build (or grab a release binary).
+#    `bin/` is gitignored and absent in a fresh clone — create it first, or
+#    `crystal build`'s link step fails looking for a directory that isn't there.
+shards install
+mkdir -p bin
 crystal build src/engram.cr -o bin/engram
+
+# Put it on your PATH — for this shell session:
+export PATH="$PWD/bin:$PATH"
+#   ...or install it somewhere already on PATH for every shell AND for git
+#   hooks (see "A note on PATH" below — this second form is what makes
+#   `engram hook install`, below, actually useful):
+#     sudo cp bin/engram /usr/local/bin/engram
 
 # 2. Inside any git repo:
 engram init
@@ -48,7 +67,8 @@ engram init
 # 3. Record a decision.
 engram new "Chose SQLite over Postgres for the memory cache" \
   --topics storage,architecture
-#   → .agents/memories/20260710153000_chose-sqlite-over-postgres.md
+#   → .agents/memories/20260710153000_chose-sqlite-over-postgres-for-the-memory-cache.md
+#     (the filename slug is the full title, not a shortened version)
 
 # Edit the file — Decision / Why / Rejected is convention, not schema:
 #   **Decision:** Use a per-clone SQLite file at .git/engram.db.
@@ -61,8 +81,12 @@ engram sync
 
 # 5. Find it again, from any tool that can shell out or speak MCP.
 engram search "postgres"
-#   → #20260710153000  Chose SQLite over Postgres  [storage, architecture]  score=-1.4
+#   → #20260710153000  Chose SQLite over Postgres for the memory cache  [storage, architecture]  score=-0.0
 #         **Decision:** Use a per-clone SQLite file at .git/engram.db. **Why:** ...
+#     (score is bm25 minus a recency boost — with only one memory in the repo
+#     the recency boost's newest/oldest denominator is 0, so it comes out at
+#     -0.0; the boost becomes meaningful, and the score more negative, once
+#     there's more than one memory to rank relative to)
 
 # 6. Commit the migration file like any other change.
 git add .agents/memories/
@@ -70,6 +94,24 @@ git commit -m "memory: chose SQLite over Postgres"
 ```
 
 That's the whole loop. No server, no daemon, no accounts.
+
+### A note on PATH
+
+Every command above is bare `engram`, and the git hooks `engram hook install`
+sets up (below) run `git checkout`/`merge`/`rebase` under git's own minimal,
+**noninteractive** hook `PATH` — which is not the same PATH your interactive
+shell uses, and frequently doesn't include wherever you built or `cp`'d the
+binary. To make sure the installed hooks actually run engram regardless:
+
+- `engram hook install` bakes the **absolute path** of whatever `engram`
+  binary you ran it with directly into the hook body — it does not rely on
+  git's hook PATH finding a bare `engram` at all. `engram doctor` confirms
+  that baked-in path still exists on disk, and warns if it doesn't (e.g. you
+  rebuilt or moved the binary after installing hooks — re-run
+  `engram hook install` from wherever it lives now to repair it).
+- For every *other* command in this README (used from your own shell, from
+  `.mcp.json`, from scripts), you still need `engram` resolvable wherever
+  you're invoking it from — the export/`cp` step above.
 
 ## The reviewer's story
 
@@ -299,26 +341,44 @@ later.
 - **Appending to a pre-existing hook file is best-effort.** The common case (no
   pre-existing `post-checkout`/`post-merge`/`post-rewrite`) writes a fresh
   `#!/bin/sh` file and is safe; installs now resolve the effective hooks
-  directory via `git` (honoring `core.hooksPath` and linked worktrees) and mark
-  hooks executable. But appending our block to a *non-trivial existing* hook
-  can still be unreachable after a prior `exit`/`exec`, assumes a POSIX shell,
-  relies on the noninteractive hook `PATH` finding `engram`, and rewrites
-  non-atomically.
+  directory via `git` (honoring `core.hooksPath` and linked worktrees), mark
+  hooks executable, and bake in the absolute path of the `engram` binary that
+  ran `hook install` — so, unlike earlier builds, the hook no longer depends
+  on git's noninteractive hook `PATH` finding a bare `engram` at all (`doctor`
+  also verifies that baked-in path still exists, and tells you to re-run
+  `hook install` if it doesn't). But appending our block to a *non-trivial
+  existing* hook can still be unreachable after a prior `exit`/`exec`, assumes
+  a POSIX shell, and rewrites non-atomically.
 
 - **Stated test coverage is narrower than exhaustive.** `docs/SPEC.md`'s spec
   (test) requirements do not exercise every adversarial edge listed here —
   failpoint/transaction interruption, multi-process races beyond the ones we do
-  test, adversarial YAML fuzzing, calendar-boundary ids, Unicode/FTS fuzzing,
-  full JSON-RPC conformance, or real hook execution under git. Core behaviors
-  (parse/serialize round-trip, sync set-diff, corrupted/deleted-cache recovery,
-  concurrent-claim id allocation, path escaping, hook resolution) *are* covered
-  by `crystal spec`.
+  test, adversarial YAML fuzzing, calendar-boundary ids, or full JSON-RPC
+  conformance. Core behaviors (parse/serialize round-trip, sync set-diff,
+  corrupted/deleted-cache recovery, concurrent-claim id allocation, path
+  escaping, hook resolution, and — since the PATH-independence hardening —
+  an installed hook actually applying/rolling back memories on a real
+  `git checkout` run under a minimal, engram-free `PATH`) *are* covered by
+  `crystal spec`. Unicode/FTS fuzzing is still not exercised.
 
 - **`--verbose` shows changed ids, not error detail.** On `sync` it prints each
   applied/rolled-back/updated id; it does not add stack-trace-level detail to
   error output (all command errors get the same one-line, actionable message
   regardless of the flag). This is intentional — engram never prints stack
   traces to users.
+
+## Tested environment
+
+Every claim in this README — the quickstart, the graceful-degradation
+behaviors, "zero config, one static binary" — was verified against one
+specific, fully-recorded environment: macOS/Apple Silicon, Crystal 1.20.0,
+stock `shards` 0.20.0, the system `libsqlite3` (confirmed FTS5-enabled), git
+2.50.1. See **[`docs/TESTED_ENVIRONMENT.md`](docs/TESTED_ENVIRONMENT.md)** for
+the exact versions, how each was confirmed, a requirements-vs-graceful-
+degradation table, and what's explicitly untested (Linux, Intel Mac, other
+`libsqlite3` builds). If you hit a failure this README doesn't explain, diff
+your environment against that file first — it's the gap-localization ledger
+for exactly that situation.
 
 ## Repository layout
 
@@ -337,6 +397,7 @@ engram/
   src/engram/cli.cr          # option parsing, subcommands, help text
   spec/                      # crystal spec; every module covered; temp-dir fixtures
   docs/SPEC.md                # the build contract this tool was built from
+  docs/TESTED_ENVIRONMENT.md  # exact verified environment + untested gaps
   .agents/memories/           # engram dogfoods itself — see its own design decisions below
 ```
 

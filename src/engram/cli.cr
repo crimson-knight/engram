@@ -412,11 +412,12 @@ module Engram
       hooks_dir = self.class.hooks_dir_for(repo_root)
 
       if sub == "install"
-        installed = Hooks.install(hooks_dir)
+        engram_path = Hooks.resolve_engram_path
+        installed = Hooks.install(hooks_dir, engram_path)
         if installed.empty?
           @stdout.puts "engram: hooks already installed"
         else
-          @stdout.puts "engram: installed hooks: #{installed.join(", ")}"
+          @stdout.puts "engram: installed hooks: #{installed.join(", ")} (binary: #{engram_path})"
         end
       else
         removed = Hooks.uninstall(hooks_dir)
@@ -472,7 +473,14 @@ module Engram
       if hooks_dir
         hooks_installed = self.class.hooks_installed(hooks_dir)
         if hooks_installed.size == Hooks::HOOK_NAMES.size
-          @stdout.puts "[ok] git hooks installed (#{hooks_installed.join(", ")})"
+          stale = self.class.hooks_with_missing_binary(hooks_dir, hooks_installed)
+          if stale.empty?
+            @stdout.puts "[ok] git hooks installed (#{hooks_installed.join(", ")})"
+          else
+            @stdout.puts "[warn] git hooks installed but the baked-in engram binary no longer exists for: " \
+                         "#{stale.join(", ")} (it was moved, rebuilt, or uninstalled since `engram hook install` " \
+                         "ran; re-run `engram hook install` from the binary you want hooks to use)"
+          end
         elsif hooks_installed.empty?
           @stdout.puts "[warn] git hooks not installed (run `engram hook install`)"
         else
@@ -719,6 +727,20 @@ module Engram
       Hooks::HOOK_NAMES.select do |name|
         path = File.join(hooks_dir, name)
         File.exists?(path) && executable?(path) && File.read(path).includes?(Hooks::MARKER_START)
+      end
+    end
+
+    # Of *installed_names* (already confirmed present/executable/marker-carrying by
+    # `hooks_installed`), which ones bake in an absolute engram path that no longer
+    # exists on disk — a hook that looks "installed" but would actually fail to run
+    # engram at all. Only checks paths `resolve_engram_path` would actually produce
+    # (absolute, starting with "/"); the rare bare-command fallback (when the OS
+    # can't report `Process.executable_path`) can't be verified this way and is left
+    # alone rather than flagged as false-stale.
+    def self.hooks_with_missing_binary(hooks_dir : String, installed_names : Array(String)) : Array(String)
+      installed_names.select do |name|
+        engram_path = Hooks.installed_engram_path(File.join(hooks_dir, name))
+        engram_path && engram_path.starts_with?('/') && !File.exists?(engram_path)
       end
     end
 

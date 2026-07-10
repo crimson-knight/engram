@@ -1,5 +1,5 @@
 name: engram
-version: 0.1.0
+version: 0.1.1
 
 description: |
   Branch-scoped memory for coding agents — perfect recall on checkout, clean amnesia on switch

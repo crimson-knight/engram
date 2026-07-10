@@ -132,7 +132,14 @@ describe "engram CLI" do
       hook_path = File.join(dir, ".git", "hooks", "post-checkout")
       hook_content = File.read(hook_path)
       hook_content.should contain("# >>> engram >>>")
-      hook_content.should contain("engram sync --quiet")
+      # The hook bakes in the absolute path of the engram binary that ran
+      # `hook install` (here, the compiled BINARY_PATH itself) rather than a
+      # bare `engram` — this is what lets the hook run correctly under git's
+      # own noninteractive PATH, which doesn't necessarily include wherever
+      # this binary lives. See the dedicated PATH-independence test below.
+      hook_content.should contain("# engram-bin: ")
+      hook_content.should contain("bin/engram")
+      hook_content.should contain("sync --quiet")
       hook_content.should contain("# <<< engram <<<")
 
       # A second install is idempotent (marker already present).
@@ -271,6 +278,84 @@ describe "engram CLI" do
     end
   end
 
+  it "installed hooks apply/roll back memories on a real `git checkout` even when engram is nowhere on git's own noninteractive PATH" do
+    ensure_binary_built
+
+    SpecHelper.with_tempdir do |dir|
+      init_git_repo(dir)
+      run_engram(dir, ["init"])
+      run_engram(dir, ["hook", "install"])
+      Process.run("git", ["add", "-A"], chdir: dir)
+      Process.run("git", ["commit", "-q", "-m", "init"], chdir: dir)
+
+      Process.run("git", ["checkout", "-q", "-b", "feature"], chdir: dir)
+      _, _, code = run_engram(dir, ["new", "Feature-only decision", "--topics", "feature"])
+      code.should eq(0)
+      Process.run("git", ["add", "-A"], chdir: dir)
+      Process.run("git", ["commit", "-q", "-m", "add memory"], chdir: dir)
+      _, _, code = run_engram(dir, ["sync", "--quiet"])
+      code.should eq(0)
+
+      stdout_text, _, code = run_engram(dir, ["recent"])
+      code.should eq(0)
+      stdout_text.should contain("Feature-only decision")
+
+      # The whole point: check out `main` via a subprocess whose PATH holds
+      # neither this repo's `bin/`, homebrew, nor anything else engram might
+      # live on — just the bare minimum a shell needs to exist at all. If the
+      # installed `post-checkout` hook still baked in a bare `engram` command
+      # (rather than the absolute path resolved at `hook install` time), git
+      # would report "engram: command not found" here and the cache would go
+      # stale; because the hook bakes in an absolute path, it must run
+      # correctly regardless.
+      checkout_stdout = IO::Memory.new
+      checkout_stderr = IO::Memory.new
+      checkout_status = Process.run("git", ["checkout", "-q", "main"], chdir: dir,
+        env: {"PATH" => "/usr/bin:/bin", "HOME" => ENV["HOME"]}, clear_env: true,
+        output: checkout_stdout, error: checkout_stderr)
+      checkout_status.success?.should be_true
+      checkout_stderr.to_s.should_not contain("command not found")
+
+      stdout_text, _, code = run_engram(dir, ["recent"])
+      code.should eq(0)
+      stdout_text.should_not contain("Feature-only decision")
+      stdout_text.should contain("No memories found")
+    end
+  end
+
+  it "doctor warns when a hook's baked-in engram binary has since been moved or deleted" do
+    ensure_binary_built
+
+    SpecHelper.with_tempdir do |dir|
+      init_git_repo(dir)
+      run_engram(dir, ["init"])
+
+      # Install hooks *from a copy* of the binary elsewhere, so the baked-in
+      # absolute path points at something we can then delete out from under
+      # it — reproducing "the binary was rebuilt/moved/uninstalled after
+      # `hook install` ran" without touching the shared BINARY_PATH every
+      # other example in this file depends on.
+      moved_binary = File.join(dir, "moved-engram")
+      FileUtils.cp(BINARY_PATH, moved_binary)
+      File.chmod(moved_binary, 0o755)
+
+      install_stdout = IO::Memory.new
+      install_status = Process.run(moved_binary, ["hook", "install"], chdir: dir, output: install_stdout)
+      install_status.success?.should be_true
+
+      hook_path = File.join(dir, ".git", "hooks", "post-checkout")
+      File.read(hook_path).should contain(moved_binary)
+
+      File.delete(moved_binary)
+
+      stdout_text, _, code = run_engram(dir, ["doctor"])
+      code.should eq(0)
+      stdout_text.should_not contain("[fail]")
+      stdout_text.should contain("[warn] git hooks installed but the baked-in engram binary no longer exists")
+      stdout_text.should contain("post-checkout")
+    end
+  end
+
   it "exits 1 with a clear message on a duplicate memory id" do
     ensure_binary_built
 
@@ -358,7 +443,7 @@ describe "engram CLI" do
     SpecHelper.with_tempdir do |dir|
       stdout_text, err, code = run_engram(dir, ["version"])
       code.should eq(0)
-      stdout_text.strip.should eq("engram 0.1.0")
+      stdout_text.strip.should eq("engram 0.1.1")
 
       stdout_text, err, code = run_engram(dir, ["--help"])
       code.should eq(0)
