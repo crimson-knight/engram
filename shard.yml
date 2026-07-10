@@ -1,0 +1,21 @@
+name: engram
+version: 0.1.0
+
+description: |
+  Branch-scoped memory for coding agents — perfect recall on checkout, clean amnesia on switch
+
+targets:
+  engram:
+    main: src/engram.cr
+
+crystal: ">= 1.11.2"
+
+license: MIT
+
+dependencies:
+  db:
+    github: crystal-lang/crystal-db
+    version: ~> 0.13.1
+  sqlite3:
+    github: crystal-lang/crystal-sqlite3
+    version: ~> 0.21.0
