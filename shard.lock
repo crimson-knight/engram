@@ -3,8 +3,10 @@ shards:
   db:
     git: https://github.com/crystal-lang/crystal-db.git
     version: 0.13.1
+    checksum: sha256:050158247b0dc5d5c29b3913fbbed4cc0a826fe8bab3a3e57fbe59640b1715dc
 
   sqlite3:
     git: https://github.com/crystal-lang/crystal-sqlite3.git
     version: 0.21.0
+    checksum: sha256:045a16583d05f8c48f2cc4a88cda78bf61ecc8f5159fff7464217854fa393cdf
 

@@ -10,7 +10,7 @@ import urllib.request
 
 ALLOWED_CONFIG = {
     "ENGRAM_LEDGER", "ENGRAM_BIN", "ENGRAM_OLLAMA_URL",
-    "ENGRAM_OLLAMA_MODEL", "ENGRAM_READER_INDEX",
+    "ENGRAM_OLLAMA_MODEL", "ENGRAM_OLLAMA_MODEL_DIGEST", "ENGRAM_READER_INDEX",
 }
 
 
@@ -39,7 +39,13 @@ def load_agent_env():
 load_agent_env()
 ENGRAM = os.environ.get("ENGRAM_BIN", "engram")
 OLLAMA = os.environ.get("ENGRAM_OLLAMA_URL", "http://localhost:11434/api/embed")
-MODEL = os.environ.get("ENGRAM_OLLAMA_MODEL", "nomic-embed-text")
+# Pinned: the tag names the version, the digest proves the local weights are
+# that version. Override both together, never the tag alone.
+MODEL = os.environ.get("ENGRAM_OLLAMA_MODEL", "nomic-embed-text:v1.5")
+MODEL_DIGEST = os.environ.get(
+    "ENGRAM_OLLAMA_MODEL_DIGEST",
+    "0a109f422b47e3a30ba2b10eca18548e944e8a23073ee3f3e947efcf3c45e59f",
+)
 INDEX = home_path(os.environ.get(
     "ENGRAM_READER_INDEX",
     os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
@@ -152,7 +158,22 @@ def parse_vocabulary(body):
     return rows
 
 
+def verify_model_digest():
+    tags_url = OLLAMA.rsplit("/api/", 1)[0] + "/api/tags"
+    with urllib.request.urlopen(tags_url, timeout=30) as response:
+        models = json.load(response).get("models", [])
+    found = next((m for m in models if m.get("name") == MODEL), None)
+    if found is None:
+        sys.exit(f"reader-embed-index: model {MODEL} is not installed; run: ollama pull {MODEL}")
+    if found.get("digest") != MODEL_DIGEST:
+        sys.exit(f"reader-embed-index: model {MODEL} digest {found.get('digest')} "
+                 f"does not match the pinned {MODEL_DIGEST}; refusing to embed")
+
+
 def embed(texts):
+    if not getattr(embed, "verified", False):
+        verify_model_digest()
+        embed.verified = True
     request = urllib.request.Request(
         OLLAMA,
         data=json.dumps({"model": MODEL, "input": texts}).encode(),
