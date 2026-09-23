@@ -34,30 +34,75 @@ scratch at any time.
   it should surface at merge time exactly like a code conflict does — not
   get silently resolved last-write-wins.
 
-## 90-second quickstart
+## Install
 
-Prerequisites: [Crystal](https://crystal-lang.org/install/) >= 1.11.2 and its
-`shards` package manager (both come together in the standard install), a C
-toolchain (Xcode Command Line Tools on macOS; `build-essential` on Debian/
-Ubuntu), and network access to github.com the first time you build (to fetch
-the two dependencies below). See [Tested environment](docs/TESTED_ENVIRONMENT.md)
-for the exact versions this was built and verified against, and what's
-untested.
+Every install path below is pinned to the **v0.2.0** release and verified by a
+hash. See [docs/SUPPLY_CHAIN.md](docs/SUPPLY_CHAIN.md) for what is pinned and why.
+
+### Homebrew (macOS, recommended)
 
 ```sh
-# 1. Fetch dependencies, then build (or grab a release binary).
-#    `bin/` is gitignored and absent in a fresh clone — create it first, or
-#    `crystal build`'s link step fails looking for a directory that isn't there.
-shards install
-mkdir -p bin
-crystal build src/engram.cr -o bin/engram
+brew install crimson-knight/tap/engram
+engram version   # → engram 0.2.0
+```
 
-# Put it on your PATH — for this shell session:
-export PATH="$PWD/bin:$PATH"
-#   ...or install it somewhere already on PATH for every shell AND for git
-#   hooks (see "A note on PATH" below — this second form is what makes
-#   `engram hook install`, below, actually useful):
-#     sudo cp bin/engram /usr/local/bin/engram
+The formula builds the v0.2.0 source tarball, which Homebrew checks against its
+sha256 (`79a4ed30…bcf3`), and installs the Crystal shards strictly from
+`shard.lock` (`--frozen`). Upgrade later with `brew upgrade engram`.
+
+### From a verified source release
+
+Prerequisites: [Crystal](https://crystal-lang.org/install/) >= 1.11.2, a C
+toolchain (Xcode Command Line Tools on macOS; `build-essential` on Debian/
+Ubuntu), and network access to github.com for the first build. See
+[Tested environment](docs/TESTED_ENVIRONMENT.md) for the exact versions this
+was built and verified against.
+
+```sh
+git clone --branch v0.2.0 https://github.com/crimson-knight/engram.git
+cd engram
+git rev-parse HEAD   # must print 96594873f6b7e12b1afbc8287defb4b6ed010986
+
+# shards-alpha verifies every shard against the sha256 in shard.lock;
+# stock `shards install --frozen` uses the same exact versions without the hash check.
+shards-alpha install --frozen
+mkdir -p bin         # bin/ is gitignored; crystal build's link step needs it
+crystal build src/engram.cr -o bin/engram --release
+
+# Put it somewhere on PATH for every shell AND for git hooks
+# (see "A note on PATH" below):
+sudo cp bin/engram /usr/local/bin/engram
+```
+
+### Agent kit for Claude Code and Codex CLI (optional)
+
+The [agent kit](docs/agent-kit.md) adds memory-index injection at session
+start, the reflect gate, checkpoints across compaction, and the reader model
+(a persistent model of the person the agent reports to). It needs the
+`engram` binary on PATH (either install above). Install it into one harness
+or both:
+
+| Claude Code | Codex CLI |
+|---|---|
+| `claude plugin marketplace add https://github.com/crimson-knight/engram.git#v0.2.0`<br>`claude plugin install engram@engram-agent-kit` | `codex plugin marketplace add crimson-knight/engram --ref 96594873f6b7e12b1afbc8287defb4b6ed010986`<br>`codex plugin add engram@engram-agent-kit` |
+
+Claude Code pins by tag; confirm the checkout afterward with
+`git -C ~/.claude/plugins/marketplaces/engram-agent-kit rev-parse HEAD`
+(it must print the commit above). Codex pins the commit directly.
+
+From a verified source checkout you can instead run
+`integrations/install.sh --claude`, `--codex`, or `--both`. It backs up any
+settings it changes and is safe to re-run. Both harnesses ask you to review
+and trust the plugin's hooks before they run.
+
+## 90-second quickstart
+
+With `engram` installed (see [Install](#install)):
+
+```sh
+# 1. Check the install.
+engram version
+#   → engram 0.2.0
 
 # 2. Inside any git repo:
 engram init
@@ -94,14 +139,6 @@ git commit -m "memory: chose SQLite over Postgres"
 ```
 
 That's the whole loop. No server, no daemon, no accounts.
-
-## Agent kit
-
-The optional [agent kit](docs/agent-kit.md) packages shared memory, reader,
-checkpoint, and reflection hooks for Claude Code and Codex CLI.
-
-Every dependency is pinned to an exact version and checked against a hash;
-see [docs/SUPPLY_CHAIN.md](docs/SUPPLY_CHAIN.md) for how to install a verified release.
 
 ### A note on PATH
 
@@ -143,11 +180,13 @@ config at `.agents/engram.yml` — a nod to the emerging convention of
 humans first). If your other tooling already reads `.agents/`, `engram`
 slots in next to it; if it doesn't yet, this is a reasonable place to start.
 
-## MCP setup (Claude Code)
+## MCP setup (Claude Code and Codex CLI)
 
 `engram mcp` runs a stdio JSON-RPC MCP server in-process — no subprocess
-shell-outs, no separate daemon to keep alive. Point Claude Code at the built
-binary via `.mcp.json` in your repo root:
+shell-outs, no separate daemon to keep alive. The agent kit plugin configures
+it for you in both harnesses. To wire it by hand instead, point Claude Code at
+the installed binary via `.mcp.json` in your repo root (with Homebrew the path
+is `$(brew --prefix)/bin/engram`):
 
 ```json
 {
@@ -160,7 +199,15 @@ binary via `.mcp.json` in your repo root:
 }
 ```
 
-That gives the agent five tools:
+For Codex CLI, add the same server to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.engram]
+command = "/absolute/path/to/engram"
+args = ["mcp"]
+```
+
+Either way, the agent gets five tools:
 
 | Tool | Does |
 |---|---|
