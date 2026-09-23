@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Optional reader vocabulary index using a local Ollama embedding endpoint."""
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+import urllib.request
+
+ALLOWED_CONFIG = {
+    "ENGRAM_LEDGER", "ENGRAM_BIN", "ENGRAM_OLLAMA_URL",
+    "ENGRAM_OLLAMA_MODEL", "ENGRAM_READER_INDEX",
+}
+
+
+def home_path(value):
+    return os.path.abspath(os.path.expanduser(value))
+
+
+def load_agent_env():
+    config = os.environ.get("ENGRAM_AGENT_ENV")
+    if not config:
+        config_root = os.environ.get("XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config"))
+        config = os.path.join(config_root, "engram", "agent.env")
+    if not os.path.isfile(config):
+        return
+    for line in open(config, encoding="utf-8"):
+        match = re.match(r"^\s*([A-Z][A-Z0-9_]*)\s*=\s*(.*?)\s*$", line)
+        if not match or match.group(1) not in ALLOWED_CONFIG or match.group(1) in os.environ:
+            continue
+        value = match.group(2)
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if not value.startswith("#"):
+            os.environ[match.group(1)] = value
+
+
+load_agent_env()
+ENGRAM = os.environ.get("ENGRAM_BIN", "engram")
+OLLAMA = os.environ.get("ENGRAM_OLLAMA_URL", "http://localhost:11434/api/embed")
+MODEL = os.environ.get("ENGRAM_OLLAMA_MODEL", "nomic-embed-text")
+INDEX = home_path(os.environ.get(
+    "ENGRAM_READER_INDEX",
+    os.path.join(os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+                 "engram", "reader-embed", "index.json"),
+))
+LEVEL_SCORE = {"uses": 3, "recognizes": 2, "lost": 1, "rejected": 0}
+
+
+def ledger_root():
+    configured = os.environ.get("ENGRAM_LEDGER")
+    if configured:
+        return home_path(configured)
+    current = os.path.abspath(os.getcwd())
+    while True:
+        if os.path.isdir(os.path.join(current, ".agents", "memories")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    fallback = os.path.expanduser("~/agent_memory")
+    return fallback if os.path.isdir(os.path.join(fallback, ".agents", "memories")) else None
+
+
+def section(body, heading):
+    parts = re.split(r"^\*\*(?=[A-Z])", body, flags=re.M)
+    for part in parts:
+        if re.search(heading, part):
+            return re.sub(r"\A[^\n]*\n", "", part)
+    return ""
+
+
+def vocabulary_page():
+    root = ledger_root()
+    if not root:
+        return None, None
+    result = subprocess.run(
+        [ENGRAM, "recent", "--topic", "reader", "--limit", "20", "--json"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if result.returncode:
+        return None, None
+    memories = json.loads(result.stdout)
+    hit = next((item for item in memories
+                if re.search("vocabulary", item.get("title", ""), re.I)), None)
+    if not hit:
+        return None, None
+    result = subprocess.run(
+        [ENGRAM, "show", str(hit["id"]), "--json"],
+        cwd=root, capture_output=True, text=True,
+    )
+    if result.returncode:
+        return None, None
+    return json.loads(result.stdout).get("body", ""), hit["id"]
+
+
+def split_depth_zero(text):
+    rows, current, depth = [], [], 0
+    for char in text:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth = max(0, depth - 1)
+        if char == "," and depth == 0:
+            rows.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    rows.append("".join(current))
+    return rows
+
+
+def split_entry(raw):
+    match = re.match(r"^(.+?)\s*\(([^)]*)\)\s*(.*)$", raw.strip())
+    if not match:
+        return raw.strip().strip('"'), "general", ""
+    term, details, remainder = match.groups()
+    domain = re.split(r"[:,]", details)[0].strip().lower()
+    gloss = details.split(":", 1)[1].strip() if ":" in details else remainder.strip(" :")
+    if not re.match(r"^[a-z][a-z-]*$", domain) or len(domain) > 20:
+        domain = "general"
+    return term.strip().strip('"'), domain, gloss
+
+
+def parse_vocabulary(body):
+    rows = []
+    for level, heading in (("uses", r"^Uses"), ("recognizes", r"^Recognizes"), ("rejected", r"^Rejected")):
+        text = re.sub(r"\s*\n\s*", " ", section(body, heading))
+        for raw in split_depth_zero(text):
+            raw = raw.strip().rstrip(".")
+            if not raw or len(raw) > 200 or raw.count("(") != raw.count(")"):
+                continue
+            if level == "rejected" and "(" not in raw:
+                continue
+            term, domain, gloss = split_entry(raw)
+            if not term or len(term) > 40 or term[0].isdigit():
+                continue
+            rows.append({"term": term, "domain": domain, "level": level, "gloss": gloss})
+    lost = section(body, r"^Lost")
+    pattern = r"^- ([^:\n]+?)(?: \(([^)]*)\))?:\s*(.+?)(?=\n- |\Z)"
+    for names, detail, anchor in re.findall(pattern, lost, flags=re.M | re.S):
+        domain = re.split(r"[:,]", detail or "general")[0].strip().lower()
+        if not re.match(r"^[a-z][a-z-]*$", domain):
+            domain = "general"
+        for term in re.split(r",|\bvs\b|versus", names):
+            term = term.strip().strip('"')
+            if term:
+                rows.append({"term": term, "domain": domain, "level": "lost",
+                             "gloss": re.sub(r"\s+", " ", anchor).strip()[:160]})
+    return rows
+
+
+def embed(texts):
+    request = urllib.request.Request(
+        OLLAMA,
+        data=json.dumps({"model": MODEL, "input": texts}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return json.load(response)["embeddings"]
+
+
+def cosine(left, right):
+    numerator = sum(a * b for a, b in zip(left, right))
+    left_size = math.sqrt(sum(value * value for value in left))
+    right_size = math.sqrt(sum(value * value for value in right))
+    return numerator / (left_size * right_size) if left_size and right_size else 0.0
+
+
+def build():
+    body, page_id = vocabulary_page()
+    if not body:
+        print("reader-embed-index: no reader vocabulary page; run engram sync", file=sys.stderr)
+        return 1
+    rows = parse_vocabulary(body)
+    try:
+        vectors = embed([f"search_document: {row['term']} ({row['domain']}): {row['gloss']}" for row in rows])
+    except Exception as error:
+        print(f"reader-embed-index: local embedding endpoint unavailable ({error})", file=sys.stderr)
+        return 1
+    for row, vector in zip(rows, vectors):
+        row["vec"] = [round(value, 5) for value in vector]
+    os.makedirs(os.path.dirname(INDEX), exist_ok=True)
+    with open(INDEX, "w", encoding="utf-8") as output:
+        json.dump({"source_page": page_id, "model": MODEL, "rows": rows}, output)
+    print(f"reader-embed-index: built {len(rows)} terms from reader page {page_id}")
+    return 0
+
+
+def load_index():
+    if not os.path.isfile(INDEX):
+        return None
+    with open(INDEX, encoding="utf-8") as source:
+        return json.load(source)
+
+
+def guess(term, domain=None, as_json=False, gloss=""):
+    index = load_index()
+    if not index:
+        result = {"term": term, "guess": None, "reason": "no local index; run reader-embed-index build"}
+        print(json.dumps(result) if as_json else "reader-embed-index: no index; run reader-embed-index build")
+        return 0
+    exact = [row for row in index["rows"]
+             if row["term"].lower() == term.lower() and (not domain or row["domain"] == domain)]
+    if exact:
+        row = exact[0]
+        result = {"term": term, "known": True, "level": row["level"],
+                  "domain": row["domain"], "gloss": row["gloss"]}
+        print(json.dumps(result) if as_json else
+              f"{term}: known, {row['level']} ({row['domain']}): {row['gloss']}")
+        return 0
+    try:
+        query = embed([f"search_document: {term} ({domain or 'general'}): {gloss}"])[0]
+    except Exception as error:
+        result = {"term": term, "guess": None, "reason": f"local embedding endpoint unavailable: {error}"}
+        print(json.dumps(result) if as_json else f"reader-embed-index: local embedding endpoint unavailable ({error})")
+        return 0
+    scored = sorted(((cosine(query, row["vec"]), row) for row in index["rows"]),
+                    key=lambda item: -item[0])[:5]
+    near = [(score, row) for score, row in scored if score >= 0.70]
+    if not near:
+        result = {"term": term, "known": False, "guess": "stranger", "confidence": "none",
+                  "reason": "no reader term is close enough; use stranger by default",
+                  "neighbors": [[row["term"], row["domain"], row["level"], round(score, 3)]
+                                for score, row in scored[:3]]}
+        print(json.dumps(result) if as_json else f"{term}: no close known term; default stranger")
+        return 0
+    base = 0.62
+    total = sum(score - base for score, _row in near) or 1
+    score = sum((similarity - base) * LEVEL_SCORE[row["level"]]
+                for similarity, row in near) / total
+    level = "uses" if score >= 2.5 else "recognizes" if score >= 1.75 else "lost" if score >= 0.75 else "rejected"
+    confidence = "high" if near[0][0] >= 0.78 else "medium" if near[0][0] >= 0.73 else "low"
+    result = {"term": term, "known": False, "guess": level, "score": round(score, 2),
+              "confidence": confidence,
+              "neighbors": [[row["term"], row["domain"], row["level"], round(similarity, 3)]
+                            for similarity, row in near]}
+    print(json.dumps(result) if as_json else
+          f"{term}: guessed {level} ({confidence} confidence) from " +
+          ", ".join(f"{row['term']} [{row['domain']}, {row['level']}, {similarity:.2f}]"
+                    for similarity, row in near))
+    return 0
+
+
+def stats():
+    index = load_index()
+    if not index:
+        print("no reader embedding index")
+        return 1
+    print(f"reader page {index['source_page']}, {len(index['rows'])} terms, model {index['model']}")
+    domains = {}
+    for row in index["rows"]:
+        domains.setdefault(row["domain"], []).append(f"{row['term']}:{row['level'][0]}")
+    for domain, terms in sorted(domains.items()):
+        print(f"  {domain}: {', '.join(terms)}")
+    return 0
+
+
+def main(args):
+    if not args or args[0] == "build":
+        return build()
+    if args[0] == "stats":
+        return stats()
+    if args[0] == "guess" and len(args) > 1:
+        domain = args[args.index("--domain") + 1] if "--domain" in args else None
+        gloss = args[args.index("--gloss") + 1] if "--gloss" in args else ""
+        return guess(args[1], domain, "--json" in args, gloss)
+    print("usage: reader-embed-index build|guess TERM [--domain D] [--gloss TEXT] [--json]|stats")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
