@@ -1,0 +1,51 @@
+{
+  "description": "Lifecycle hooks for Claude Code.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ruby \"${CLAUDE_PLUGIN_ROOT}/scripts/shared/bin/engram-agent\" session-start",
+            "timeout": 30,
+            "statusMessage": "Loading engram memory and reader context"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ruby \"${CLAUDE_PLUGIN_ROOT}/scripts/shared/bin/engram-agent\" reflect",
+            "timeout": 30,
+            "statusMessage": "Checking that session work was recorded"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ruby \"${CLAUDE_PLUGIN_ROOT}/scripts/shared/bin/engram-agent\" checkpoint precompact",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ruby \"${CLAUDE_PLUGIN_ROOT}/scripts/shared/bin/engram-agent\" checkpoint postcompact",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

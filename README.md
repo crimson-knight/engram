@@ -95,6 +95,14 @@ git commit -m "memory: chose SQLite over Postgres"
 
 That's the whole loop. No server, no daemon, no accounts.
 
+## Agent kit
+
+The optional [agent kit](docs/agent-kit.md) packages shared memory, reader,
+checkpoint, and reflection hooks for Claude Code and Codex CLI.
+
+Every dependency is pinned to an exact version and checked against a hash;
+see [docs/SUPPLY_CHAIN.md](docs/SUPPLY_CHAIN.md) for how to install a verified release.
+
 ### A note on PATH
 
 Every command above is bare `engram`, and the git hooks `engram hook install`

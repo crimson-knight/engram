@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "engram": {
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "cfg=\"${ENGRAM_AGENT_ENV:-${XDG_CONFIG_HOME:-$HOME/.config}/engram/agent.env}\"; if [ -r \"$cfg\" ]; then set -a; . \"$cfg\"; set +a; fi; if [ -n \"${ENGRAM_LEDGER:-}\" ]; then cd \"$ENGRAM_LEDGER\"; fi; exec \"${ENGRAM_BIN:-engram}\" mcp"
+      ]
+    }
+  }
+}

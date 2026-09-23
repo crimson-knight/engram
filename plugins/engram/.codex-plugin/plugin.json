@@ -1,0 +1,54 @@
+{
+  "name": "engram",
+  "version": "0.2.0",
+  "description": "Branch-scoped memory, reader guidance, and checkpoint hooks for coding agents.",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "hooks": {
+    "hooks": {
+      "SessionStart": [
+        {
+          "matcher": "startup|resume|clear|compact",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "ruby \"${PLUGIN_ROOT}/scripts/shared/bin/engram-agent\" session-start",
+              "statusMessage": "Loading engram memory and reader context"
+            }
+          ]
+        }
+      ],
+      "Stop": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "ruby \"${PLUGIN_ROOT}/scripts/shared/bin/engram-agent\" reflect",
+              "statusMessage": "Checking that session work was recorded"
+            }
+          ]
+        }
+      ],
+      "PreCompact": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "ruby \"${PLUGIN_ROOT}/scripts/shared/bin/engram-agent\" checkpoint precompact"
+            }
+          ]
+        }
+      ],
+      "PostCompact": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "ruby \"${PLUGIN_ROOT}/scripts/shared/bin/engram-agent\" checkpoint postcompact"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

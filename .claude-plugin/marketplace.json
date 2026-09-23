@@ -1,0 +1,20 @@
+{
+  "name": "engram-agent-kit",
+  "description": "Harness-neutral branch-scoped memory, reader guidance, and lifecycle hooks for coding agents.",
+  "owner": {
+    "name": "engram maintainers",
+    "url": "https://github.com/crimson-knight/engram"
+  },
+  "plugins": [
+    {
+      "name": "engram",
+      "source": "./plugins/engram",
+      "description": "Branch-scoped memory, reader guidance, and checkpoint hooks for Claude Code and Codex.",
+      "version": "0.2.0",
+      "author": {
+        "name": "engram maintainers",
+        "url": "https://github.com/crimson-knight/engram"
+      }
+    }
+  ]
+}

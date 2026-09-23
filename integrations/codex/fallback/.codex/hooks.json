@@ -1,0 +1,45 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ruby \"$ENGRAM_AGENT_KIT_ROOT/integrations/shared/bin/engram-agent\" session-start"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ruby \"$ENGRAM_AGENT_KIT_ROOT/integrations/shared/bin/engram-agent\" reflect"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ruby \"$ENGRAM_AGENT_KIT_ROOT/integrations/shared/bin/engram-agent\" checkpoint precompact"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "ruby \"$ENGRAM_AGENT_KIT_ROOT/integrations/shared/bin/engram-agent\" checkpoint postcompact"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "engram-agent-kit",
+  "interface": {
+    "displayName": "engram agent kit"
+  },
+  "plugins": [
+    {
+      "name": "engram",
+      "source": {
+        "source": "local",
+        "path": "./plugins/engram"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

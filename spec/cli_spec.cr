@@ -443,7 +443,7 @@ describe "engram CLI" do
     SpecHelper.with_tempdir do |dir|
       stdout_text, err, code = run_engram(dir, ["version"])
       code.should eq(0)
-      stdout_text.strip.should eq("engram 0.1.1")
+      stdout_text.strip.should eq("engram 0.2.0")
 
       stdout_text, err, code = run_engram(dir, ["--help"])
       code.should eq(0)

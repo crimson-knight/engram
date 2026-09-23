@@ -1,0 +1,12 @@
+{
+  "name": "engram",
+  "description": "Branch-scoped memory, reader guidance, and checkpoint hooks for coding agents.",
+  "version": "0.2.0",
+  "author": {
+    "name": "engram maintainers",
+    "url": "https://github.com/crimson-knight/engram"
+  },
+  "homepage": "https://github.com/crimson-knight/engram",
+  "repository": "https://github.com/crimson-knight/engram",
+  "license": "MIT"
+}
